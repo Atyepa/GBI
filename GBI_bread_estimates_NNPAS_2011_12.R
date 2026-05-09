@@ -19,7 +19,7 @@ library(survey)
 library(srvyr)
 
 # --- Paths ----------------------------------------------------------------
-curf_dir <- "CURF"
+curf_dir <- "CURF_2011-12"  # Update this path to where the CURF files are stored
 
 # =============================================================================
 # SECTION 1: Load and prepare reference data

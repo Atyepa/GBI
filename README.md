@@ -96,7 +96,7 @@ install.packages(c("tidyverse", "readxl", "haven", "survey", "srvyr", "openxlsx"
 
 ## Statistical disclosure control (2023 only)
 
-The 2023 script runs on full unit-record DataLab files and must not release cells derived from fewer than 3 respondents. Section 11 of the 2023 script adds a `suppress` column to `final_output` before export:
+The 2023 script runs on full unit-record DataLab files and must not release cells derived from fewer than n respondents. Section 11 of the 2023 script adds a `suppress` column to `final_output` before export:
 
 | Value | Meaning |
 |---|---|

@@ -14,7 +14,7 @@
 #     (b) AUSNUT 2023 WGBRGM/RFBRGM majority, (c) FIBRE g/100 g cut-off.
 #   - Education uses the single combined HIGHLVLD field.
 #   - Sex uses SEXBIRTH.
-#   - Remoteness from ARIA21SL: urban = 1-2, rural = 3-5.
+#   - Remoteness from ARIA21SL: urban = 0-1, rural = 2-4.
 #   - 2-day responder flag derived from COUNTFD2 > 0.
 #   - Day-1 energy uses ENERGYF1 (food-only); kcal = ENERGYF1 / 4.184.
 #
@@ -218,14 +218,14 @@ cat("\nEducation level distribution:\n")
 persons %>% count(edu_level) %>% print()
 
 # --- 3d. Residence (ARIA21SL -> Urban/Rural) --------------------------------
-# Urban (1) = ARIA21SL 1 (Major cities) + 2 (Inner regional)
-# Rural (2) = ARIA21SL 3 (Outer regional) + 4 (Remote) + 5 (Very remote)
+# Urban (1) = ARIA21SL 0 (Major cities) + 1 (Inner regional)
+# Rural (2) = ARIA21SL 2 (Outer regional) + 3 (Remote) + 4 (Very remote)
 persons <- persons %>%
   mutate(
     ARIA21SL_n = as.integer(ARIA21SL),
     residence = case_when(
-      ARIA21SL_n %in% c(1, 2)        ~ 1L,
-      ARIA21SL_n %in% c(3, 4, 5)     ~ 2L,
+      ARIA21SL_n %in% c(0, 1)        ~ 1L,
+      ARIA21SL_n %in% c(2, 3, 4)     ~ 2L,
       TRUE                           ~ NA_integer_
     )
   )
@@ -598,8 +598,8 @@ ba_notes <- paste(
   "(b) AUSNUT 2023 WGBRGM/RFBRGM majority;",
   "(c) FIBRE > 5 g/100 g -> wholegrain;",
   "default refined.",
-  "Urban = ARIA21SL 1-2 (Major cities + Inner regional);",
-  "Rural = ARIA21SL 3-5 (Outer regional + Remote + Very remote).",
+  "Urban = ARIA21SL 0-1 (Major cities + Inner regional);",
+  "Rural = ARIA21SL 2-4 (Outer regional + Remote + Very remote).",
   "Education from HIGHLVLD (level of highest educational attainment).",
   "Education for children <15 assigned from the highest-educated",
   "adult in the household."
@@ -722,8 +722,8 @@ survey_info <- list(
               "add predicted value at 2000 kcal to residuals; exponentiate",
               "if log-transformed. Energy adjustment performed on full sample,",
               "not per-stratum.")),
-  c(19, paste("Urban = ARIA21SL 1-2 (Major cities + Inner regional);",
-              "Rural = ARIA21SL 3-5 (Outer regional + Remote + Very remote).",
+  c(19, paste("Urban = ARIA21SL 0-1 (Major cities + Inner regional);",
+              "Rural = ARIA21SL 2-4 (Outer regional + Remote + Very remote).",
               "Education from HIGHLVLD (level of highest educational",
               "attainment); children <15 assigned the highest education",
               "level of an adult in the same household.",
@@ -756,8 +756,8 @@ codebook_comments <- c(
         "provided. Energy adjustment uses the residual method standardised",
         "to 2000 kcal."),
   "Sex = SEXBIRTH (sex at birth) on the NNPAS 2023 selected-person file.",
-  paste("Urban = ARIA21SL 1 (Major cities) + 2 (Inner regional);",
-        "Rural = ARIA21SL 3 (Outer regional) + 4 (Remote) + 5 (Very remote)."),
+  paste("Urban = ARIA21SL 0 (Major cities) + 1 (Inner regional);",
+        "Rural = ARIA21SL 2 (Outer regional) + 3 (Remote) + 4 (Very remote)."),
   paste("Mapped from HIGHLVLD: Tertiary = postgraduate, bachelor, advanced",
         "diploma/diploma, certificate III/IV; Secondary = year 10-12,",
         "certificate I/II; Primary = year 9 or below, no educational",

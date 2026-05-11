@@ -101,7 +101,7 @@ The 2023 script runs on full unit-record DataLab files and must not release cell
 | Value | Meaning |
 |---|---|
 | `""` | No suppression — safe to release |
-| `"P"` | **Primary**: cell has `n < 3` — must be redacted |
+| `"P"` | **Primary**: cell has `n < x` — must be redacted (where x is threshold minimum) |
 | `"S"` | **Secondary**: cell is safe on its own, but publishing it would allow back-calculation of an adjacent primary-suppressed cell by differencing from a total — should also be redacted |
 
 Three additive relationships are checked: `bread_subtype` (total = WG + refined), `sex` (persons = males + females), and `age_grp` (all-ages total = sum of 12 bands). For the binary dimensions a complementary cell is always suppressed alongside the primary; for the 12 age bands a single additional band (smallest remaining `n`) is flagged to make the system underdetermined.

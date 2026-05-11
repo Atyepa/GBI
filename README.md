@@ -1,6 +1,6 @@
 # GBI Bread Intake Estimates — NNPAS 2011-12 and NNPAS 2023
 
-R programs that produce aggregate bread intake estimates from the ABS National Nutrition and Physical Activity Survey (NNPAS), formatted for the [Global Bread Intake (GBI) Study](https://globalbreadintake.org).
+R programs that produce aggregate bread intake estimates from the ABS National Nutrition and Physical Activity Survey (NNPAS), formatted for Global Bread Intake Study].
 
 Two scripts are provided, one per survey wave:
 
@@ -9,7 +9,7 @@ Two scripts are provided, one per survey wave:
 | `GBI_bread_estimates_NNPAS_2011_12.R` | NNPAS 2011-12 | ABS Basic CURF (CSV) |
 | `GBI_bread_estimates_NNPAS_2023.R` | NNPAS 2023 | ABS DataLab unit-record files (`sas7bdat`) |
 
-Both scripts produce output matching the GBI Aggregate Data Form template (included as `GBI_Aggregate_Data_Form.xlsx` and an editable copy `GBI_Aggregate_Data_Form_unprotected.xlsx`).
+Each script produces output matching the data specifications provided. 
 
 ## What they do
 

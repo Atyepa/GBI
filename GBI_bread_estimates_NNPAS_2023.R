@@ -665,13 +665,97 @@ if (max(final_output$n, na.rm = TRUE) > nrow(persons)) {
 }
 
 # =============================================================================
-# SECTION 11: Export CSV
+# SECTION 11: Statistical Disclosure Control (cell suppression flags)
+# =============================================================================
+# suppress = "P": primary suppression (n < 3)
+# suppress = "S": secondary suppression (prevents back-calculation via total)
+#
+# Additive relationships guarded:
+#   (1) bread_subtype: 0 = 1 + 2   — binary complement rule
+#   (2) sex:           0 = 1 + 2   — binary complement rule
+#   (3) age_grp:       0 = Σ(1:12) — age_grp=0 only exists in age×sex rows;
+#                                     suppress 1 extra band (smallest n) so the
+#                                     system is underdetermined (2 unknowns, 1 eq)
+#
+# Note: one round of secondary suppression is applied. Multi-step differencing
+# across both dimensions simultaneously is not guarded here.
+
+# ── Step 1: Primary ──────────────────────────────────────────────────────────
+final_output <- final_output %>%
+  mutate(suppress_primary = !is.na(n) & n < 3)
+
+# ── Step 2: bread_subtype secondary (0 = 1 + 2) ──────────────────────────────
+final_output <- final_output %>%
+  group_by(bread_def, energy_adj, sex, residence, edu_level, age_grp) %>%
+  mutate(
+    .n_prim_st = sum(suppress_primary & bread_subtype %in% c(1L, 2L))
+  ) %>%
+  ungroup() %>%
+  mutate(suppress_sec_subtype =
+           .n_prim_st == 1L & bread_subtype %in% c(1L, 2L) & !suppress_primary) %>%
+  select(-.n_prim_st)
+
+# ── Step 3: sex secondary (0 = 1 + 2) ────────────────────────────────────────
+final_output <- final_output %>%
+  group_by(bread_def, bread_subtype, energy_adj, residence, edu_level, age_grp) %>%
+  mutate(
+    .n_prim_sx = sum(suppress_primary & sex %in% c(1L, 2L))
+  ) %>%
+  ungroup() %>%
+  mutate(suppress_sec_sex =
+           .n_prim_sx == 1L & sex %in% c(1L, 2L) & !suppress_primary) %>%
+  select(-.n_prim_sx)
+
+# ── Step 4: age_grp secondary (0 = Σ 1:12; only strata where age_grp=0 exists)
+final_output <- final_output %>%
+  group_by(bread_def, bread_subtype, energy_adj, sex, residence, edu_level) %>%
+  mutate(
+    .has_age_total = any(age_grp == 0L),
+    .n_prim_ag     = if_else(.has_age_total,
+                             sum(suppress_primary & age_grp != 0L),
+                             0L)
+  ) %>%
+  ungroup()
+
+# For each group with exactly 1 primary-suppressed band, tag the band with
+# the next-smallest n as the secondary suppression target
+age_sec_targets <- final_output %>%
+  filter(.n_prim_ag == 1L, age_grp != 0L, !suppress_primary) %>%
+  group_by(bread_def, bread_subtype, energy_adj, sex, residence, edu_level) %>%
+  slice_min(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(bread_def, bread_subtype, energy_adj, sex, residence, edu_level, age_grp) %>%
+  mutate(.sec_age = TRUE)
+
+final_output <- final_output %>%
+  left_join(age_sec_targets,
+            by = c("bread_def","bread_subtype","energy_adj",
+                   "sex","residence","edu_level","age_grp")) %>%
+  mutate(suppress_sec_age = replace_na(.sec_age, FALSE)) %>%
+  select(-.has_age_total, -.n_prim_ag, -.sec_age)
+
+# ── Combine into single suppress column ──────────────────────────────────────
+final_output <- final_output %>%
+  mutate(
+    suppress = case_when(
+      suppress_primary                                             ~ "P",
+      suppress_sec_subtype | suppress_sec_sex | suppress_sec_age  ~ "S",
+      TRUE                                                         ~ ""
+    )
+  ) %>%
+  select(-suppress_primary, -suppress_sec_subtype, -suppress_sec_sex, -suppress_sec_age)
+
+cat("\nCell suppression summary:\n")
+final_output %>% count(suppress) %>% print()
+
+# =============================================================================
+# SECTION 12: Export CSV
 # =============================================================================
 write_csv(final_output, output_csv)
 cat("\nCSV exported to:", output_csv, "\n")
 
 # =============================================================================
-# SECTION 12: Fill GBI Excel template
+# SECTION 13: Fill GBI Excel template
 # =============================================================================
 cat("\n--- Filling GBI Excel template ---\n")
 

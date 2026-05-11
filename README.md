@@ -89,10 +89,24 @@ install.packages(c("tidyverse", "readxl", "haven", "survey", "srvyr", "openxlsx"
 | **Wholegrain/refined classification** | ADG columns 1011/1021 first; description-keyword fallback for items neither column flags. | Layered: description keywords → AUSNUT 2023 `WGBRGM`/`RFBRGM` majority → `FIBRE` > 5 g/100 g → default refined. |
 | **Sex** | `SEX` | `SEXBIRTH` |
 | **Education** | `HYSCHCBC` + `LVHNSQBC` | `HIGHLVLD` (single combined level) |
-| **Remoteness** | `ARIABC` 1-2 → urban; 3 → rural | `ARIA21SL` 1-2 → urban; 3-5 → rural |
+| **Remoteness** | `ARIABC` 1-2 → urban; 3 → rural | `ARIA21SL` 0-1 → urban; 2-4 → rural |
 | **Day-1 energy** | `ENERGYT1` (food + supplements) | `ENERGYF1` (food only) |
 | **Recall-day count** | `NUMRECAL` | derived from `COUNTFD2 > 0` |
 | **Person ID** | `ABSPID` (effectively unique in CURF) | concatenated `ABSHIDD` + `ABSPID` (`ABSPID` is only unique within household in DataLab; sas column is actually `ABSPIDD` and is renamed on read) |
+
+## Statistical disclosure control (2023 only)
+
+The 2023 script runs on full unit-record DataLab files and must not release cells derived from fewer than 3 respondents. Section 11 of the 2023 script adds a `suppress` column to `final_output` before export:
+
+| Value | Meaning |
+|---|---|
+| `""` | No suppression — safe to release |
+| `"P"` | **Primary**: cell has `n < 3` — must be redacted |
+| `"S"` | **Secondary**: cell is safe on its own, but publishing it would allow back-calculation of an adjacent primary-suppressed cell by differencing from a total — should also be redacted |
+
+Three additive relationships are checked: `bread_subtype` (total = WG + refined), `sex` (persons = males + females), and `age_grp` (all-ages total = sum of 12 bands). For the binary dimensions a complementary cell is always suppressed alongside the primary; for the 12 age bands a single additional band (smallest remaining `n`) is flagged to make the system underdetermined.
+
+The 2011-12 script uses the Basic CURF, which is already confidentialised by ABS, so no suppression step is needed.
 
 ## Output schema
 

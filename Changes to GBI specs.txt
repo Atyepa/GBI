@@ -1,0 +1,31 @@
+Changes to GBI specs
+
+1) Need to follow the instructions in “GBI_Methodological_Note_Energy_Adjustment.pdf” – the main change is removing non-plausible energy reporters so there will be a new step to calculate BMR (because we have now imputed all the missing measured weight & height values so the BMR can now be calculated for all records except where respondent )
+
+2) FOODCODC (AUSNUT Codes) need precise specification for “bread alone” & “all bread”
+For 2011-12 “bread alone” should use these:
+12201001: 12203017, 12203022: 12305006, 12307001: 12307004, 13201001, 13201002, 13201010, 13201012, 13203001, 13203002, 13205003
+ 
+
+For 2011-12 “all bread” should use these:
+12201001: 12203017, 12203022: 12305006, 12307001: 12307004, 13201001, 13201002, 13201010, 13201012, 13203001, 13203002, 13205003, 13503001: 13507004, 13507014: 13507036, 13508012
+
+
+ 
+
+For 2023 “bread alone” should use these:
+12201001: 12305002,  12305004: 12305007, 12306001: 12306004, 13201001: 13201002,  13201018: 13201019,  13202001, 13204003
+
+
+For 2023  “all bread” should use these:
+12201001: 12305002,  12305004: 12305007, 12306001: 12306004, 13201001: 13201002,  13201018: 13201019,  13202001, 13204003, 13503001: 13504001, 13504004: 13507004, 13507008: 13507012, 13507016: 13507019
+
+ 
+These should now align with the inclusions/exclusions in definitions provided in GBI_Aggregate_Data_Form.xlsx
+
+3) ADG codes of interest (to capture mixed foods) need to expand to include:
+1015 (WG/HF Savoury crackers/crispbreads)
+1017 (WG/HF English muffins and scones)
+1025 (Ref/LF Savoury crackers/crispbreads)
+1027 (Ref/LF English muffins and scones)
+

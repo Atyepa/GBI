@@ -1,0 +1,31 @@
+We are going to calculate BMR so we need to fill empty values height weight values 
+
+Self-reported height and weight
+
+In addition to the voluntary measured items, respondents in the 2023 NNPAS were also asked to self-report their height and weight measurements (respondents who advised that they were pregnant were not asked to self-report as they are not applicable to the BMI population for analysis). This provides valuable information about height and weight which can be used in assisting in the imputation for those with missing values.
+
+How imputation works
+
+In the 2023 NNPAS, missing values were imputed using the 'hot decking' imputation method. In this method, a record with a missing response (the 'recipient') receives the response of another similar record (the 'donor'). Several characteristics were used to match recipients. For adults, they were:
+
+age group
+sex
+part of state (capital city and balance of state)
+self-perceived body mass (underweight, acceptable, or overweight)
+whether or not has high cholesterol (as a long-term health condition)
+self-reported BMI category (calculated from self-reported height and weight).
+For example, a female recipient aged 35–39 years who lives in a capital city, has a self-reported BMI category of overweight (calculated using self-reported height and weight), has a self-perceived body mass of healthy and has high cholesterol will match to a donor record who has the same profile (female, 35–39, self-reports as overweight, etc.).
+
+For BMI, 86.2% of imputed records matched to a donor record using all variables. The remaining 13.8% were matched using fewer variables.
+
+For children aged 2-17 years, the following variables were used:
+
+single year of age
+sex
+part of state
+self-reported BMI category. 
+Self-perceived body mass and cholesterol data were not collected for children aged 2-17 years so could not be used as an imputation variable.
+
+Sex was not used as a variable to match recipients to donors for people with a Transgender and Gender Diverse experience. People with a Transgender and Gender Diverse experience did not act as donors during the imputation process. Imputation was not performed for people who self-reported pregnancy as they are not applicable to the BMI population for analysis. 
+
+ 

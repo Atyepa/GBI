@@ -1,175 +1,225 @@
 # =============================================================================
-# GBI Aggregate Bread Intake Estimates — NNPAS 2011-12
+# GBI Aggregate Bread Intake Estimates -- NNPAS 2011-12
 # =============================================================================
 # Produces population-level bread intake estimates from the ABS 2011-12
 # National Nutrition and Physical Activity Survey (NNPAS) Basic CURF,
 # formatted for the Global Bread Intake (GBI) Study aggregate data request.
 #
-# Output: Long-format data frame matching the GBI Data_Template structure,
-#         with fully stratified and age×sex-only estimates for:
-#         - "Bread alone" and "Bread all sources"
-#         - Total bread, wholegrain bread, refined bread
-#         - Non-energy-adjusted and energy-adjusted (residual method)
-#
-# Key assumptions documented in-line and in output notes column.
+# Updated 2026-05 to follow the GBI methodological clarification note
+# ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026):
+#   - Person-level mean intakes are computed across all valid recall days
+#     (Day 1 and, where available, Day 2), with zero-intake days retained.
+#   - Energy-adjusted intake (residual method, log-log, standardized to
+#     2,000 kcal/day) is the preferred output, alongside unadjusted intake.
+#   - Energy-plausibility screening uses Schofield BMR + Goldberg cutoffs
+#     (EI:BMR < 0.9 or > 2.4). Children <10y and pregnant women are exempt
+#     from this filter and are always retained.
+#   - SDs are now the weighted empirical SD of person-level mean intakes
+#     within each stratum (no ANOVA partitioning).
+#   - Both bread-alone and bread-from-all-sources use explicit AUSNUT
+#     code lists per the 2026-05 GBI specification clarification, and the
+#     ADG mixed-food disaggregation now uses ADG columns
+#     1011, 1015, 1017 (wholegrain) and 1021, 1025, 1027 (refined).
 # =============================================================================
+
 library(tidyverse)
 library(readxl)
 library(survey)
 library(srvyr)
+library(openxlsx)
 
 # --- Paths ----------------------------------------------------------------
-curf_dir <- "CURF_2011-12"  # Update this path to where the CURF files are stored
+curf_dir <- "CURF_2011-12"  # update if CURF files live elsewhere
+
+template_path <- "GBI_Aggregate_Data_Form_unprotected.xlsx"
+output_csv    <- "GBI_DataTemplate_NNPAS_2011-12.csv"
+output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2011-12.xlsx"
+
+# --- Disclosure-control "rule of n" --------------------------------------
+# Minimum cell size below which a stratum is primary-suppressed.
+# 3 is a common general rule; ABS DataLab egress requires 10. Change here
+# (e.g., MIN_CELL_N <- 10) when preparing data for DataLab clearance.
+MIN_CELL_N <- 3
 
 # =============================================================================
-# SECTION 1: Load and prepare reference data
+# SECTION 1: AUSNUT food-code lists and ADG reference data
 # =============================================================================
 
-# --- 1a. ADG Database (food composition / disaggregation) -------------------
+# --- 1a. AUSNUT 2011-13 code lists (per 2026-05 GBI spec clarification) -----
+# "Bread alone" -- standalone bread products
+bread_alone_codes_2011_12 <- c(
+  12201001:12203017, 12203022:12305006, 12307001:12307004,
+  13201001, 13201002, 13201010, 13201012,
+  13203001, 13203002, 13205003
+)
+
+# "All bread" -- bread alone PLUS mixed-dish codes whose bread component
+# is captured by ADG disaggregation (sandwiches, burgers, pizza, etc.).
+all_bread_codes_2011_12 <- c(
+  bread_alone_codes_2011_12,
+  13503001:13507004, 13507014:13507036, 13508012
+)
+
+# --- 1b. ADG Database (food composition / disaggregation) -------------------
 adg <- read_excel(file.path(curf_dir, "ADG_Database.xlsx"))
 
-# The ADG database contains two sets of rows per food: "g/100g" (gram weights)
-# and "Serves/100g" (dietary guideline serves). We need only the gram weights.
+# The ADG database has both "g/100g" and "Serves/100g" rows per food.
+# We need only the gram weights.
 adg <- adg %>% filter(Unit == "g/100g")
 
 cat("ADG filtered to g/100g:", nrow(adg), "rows,",
     n_distinct(adg$FOODCODC), "unique FOODCODCs\n")
 
-# Rename the numeric ADG columns for clarity
-# Column 1011 = wholegrain bread g/100g, column 1021 = refined bread g/100g
+# Rename ADG bread columns:
+#   1011 WG/HF Bread (regular varieties)
+#   1015 WG/HF Savoury crackers/crispbreads
+#   1017 WG/HF English muffins and scones
+#   1021 Ref/LF Bread (regular varieties)
+#   1025 Ref/LF Savoury crackers/crispbreads
+#   1027 Ref/LF English muffins and scones
 adg <- adg %>%
   rename(
-    adg_wg_bread = `1011`,   # wholegrain bread (g per 100g of food)
-    adg_ref_bread = `1021`   # refined/low-fibre bread (g per 100g of food)
+    adg_wg_br  = `1011`,
+    adg_wg_sv  = `1015`,
+    adg_wg_mf  = `1017`,
+    adg_ref_br = `1021`,
+    adg_ref_sv = `1025`,
+    adg_ref_mf = `1027`
+  ) %>%
+  mutate(
+    across(c(adg_wg_br, adg_wg_sv, adg_wg_mf,
+             adg_ref_br, adg_ref_sv, adg_ref_mf),
+           ~ replace_na(as.numeric(.x), 0)),
+    adg_wg_total  = adg_wg_br  + adg_wg_sv  + adg_wg_mf,
+    adg_ref_total = adg_ref_br + adg_ref_sv + adg_ref_mf
   )
 
-# --- 1b. Build bread-alone classification lookup ----------------------------
-# "Bread alone" = FOODCODC in range 12201001 to 12307004
-# These are standalone bread products (not sandwiches, pizza, wraps etc.)
-
-bread_alone_codes <- adg %>%
-  filter(FOODCODC >= 12201001, FOODCODC <= 12307004) %>%
-  select(FOODCODC, Description, adg_wg_bread, adg_ref_bread)
-
-# Classify each bread code as wholegrain or refined:
-#   - ADG column 1011 > 0 → wholegrain
-#   - ADG column 1021 > 0 → refined
-#   - Neither (42 items: English muffins, sweet buns, garlic bread, etc.)
-#     → classify by keyword, defaulting to refined
+# --- 1c. Bread-alone wholegrain/refined classification ----------------------
+# For each bread-alone food code, classify by ADG totals; fall back to
+# description keywords; default to refined.
 wg_keywords <- c("wholemeal", "wholegrain", "whole grain", "mixed grain",
-                  "multigrain", "multi-grain", "rye")
+                 "multigrain", "multi-grain", "\\brye\\b", "spelt",
+                 "pumpernickel", "added fibre", "high fibre",
+                 "chapatti", "injera", "roti")
 
-bread_alone_codes <- bread_alone_codes %>%
+bread_alone_classify <- adg %>%
+  filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
+  select(FOODCODC, Description, adg_wg_total, adg_ref_total) %>%
   mutate(
     desc_lower = str_to_lower(Description),
+    desc_wg    = str_detect(desc_lower, str_c(wg_keywords, collapse = "|")),
     bread_class = case_when(
-      adg_wg_bread > 0  ~ "wholegrain",
-      adg_ref_bread > 0 ~ "refined",
-      # For items with neither ADG flag, use keyword matching
-      str_detect(desc_lower, str_c(wg_keywords, collapse = "|")) ~ "wholegrain",
-      TRUE ~ "refined"
+      adg_wg_total  > adg_ref_total  ~ "wholegrain",
+      adg_ref_total > adg_wg_total   ~ "refined",
+      desc_wg                        ~ "wholegrain",
+      TRUE                           ~ "refined"
     )
   ) %>%
   select(FOODCODC, Description, bread_class)
 
-cat("Bread alone classification:\n")
-count(bread_alone_codes, bread_class) %>% print()
+cat("Bread alone codes (", length(bread_alone_codes_2011_12), "in list):",
+    nrow(bread_alone_classify), "classified\n")
+count(bread_alone_classify, bread_class) %>% print()
 
-# --- 1c. ADG lookup for "bread all sources" ---------------------------------
-# For every food, the ADG gives g of wholegrain bread and g of refined bread
-# per 100g of the food as consumed. This handles mixed-dish disaggregation.
+write_csv(bread_alone_classify, "bread_alone_classification_NNPAS_2011_12.csv")
+
+# --- 1d. ADG bread content lookup for "bread all sources" -------------------
 adg_bread_content <- adg %>%
-  filter(adg_wg_bread > 0 | adg_ref_bread > 0) %>%
-  select(FOODCODC, adg_wg_bread, adg_ref_bread)
+  filter(adg_wg_total > 0 | adg_ref_total > 0) %>%
+  select(FOODCODC, adg_wg_total, adg_ref_total)
 
-cat("\nFoods with any bread content:", nrow(adg_bread_content), "\n")
+cat("\nFoods with any bread content in ADG:", nrow(adg_bread_content), "\n")
 
 # =============================================================================
 # SECTION 2: Load CURF data files
 # =============================================================================
 
 # --- 2a. Person file --------------------------------------------------------
+# Variables loaded (DIL names; verify in your CURF release):
+#   ABSHID, ABSPID  ............ identifiers
+#   AGE, SEX  .................. demographics
+#   PHDCMHBC, PHDKGWBC  ........ measured height (cm), weight (kg);
+#                                 imputed values overwrite 997/998 codes
+#   PREGNANT  .................. pregnancy flag (1 = pregnant) -- TODO:
+#                                 confirm name against the DIL distributed
+#                                 with the imputed dataset
+#   NPAFINWT, WPM01xx  ......... Day-1 person weight + 60 replicate weights
+#   NPAD2WGT  .................. Day-2 weight (0 if no Day 2 recall)
+#   NUMRECAL  .................. number of recall days (1 or 2)
+#   ARIABC, HYSCHCBC, LVHNSQBC . stratification variables
+#   ENERGYT1, ENERGYT2  ........ Day-1 / Day-2 total energy intake (kJ)
 persons <- read_csv(file.path(curf_dir, "npa11bp.csv"),
                     show_col_types = FALSE)
 
-# Keep the variables we need
 persons <- persons %>%
   select(
     ABSHID, ABSPID,
     AGE, SEX,
-    NPAFINWT,                          # Day 1 person weight
-    NPAD2WGT,                          # Day 2 weight (0 if no Day 2)
-    NUMRECAL,                          # Number of recall days (1 or 2)
-    ARIABC,                            # Remoteness (1=Major cities, 2=Inner regional, 3=Other)
-    HYSCHCBC,                          # Highest year of school completed
-    LVHNSQBC,                          # Level of highest non-school qualification
-    ENERGYT1, ENERGYT2,                # Total energy intake kJ (Day 1, Day 2)
-    starts_with("WPM01")              # 60 jackknife replicate weights
+    any_of(c("PHDCMHBC", "PHDKGWBC", "PREGNANT")),
+    NPAFINWT, NPAD2WGT, NUMRECAL,
+    ARIABC, HYSCHCBC, LVHNSQBC,
+    ENERGYT1, ENERGYT2,
+    starts_with("WPM01")
   )
+
+# Backstop: if the measured h/w or pregnancy columns are named differently
+# in the imputed CURF release, replace these lines to populate the columns
+# the script uses below (height_cm, weight_kg, pregnant_flag).
+if (!"PHDCMHBC" %in% names(persons)) persons$PHDCMHBC <- NA_real_
+if (!"PHDKGWBC" %in% names(persons)) persons$PHDKGWBC <- NA_real_
+if (!"PREGNANT" %in% names(persons)) persons$PREGNANT <- NA_integer_
 
 cat("\nPersons loaded:", nrow(persons), "\n")
 
-# --- 2b. Food file (Day 1 only for point estimates) -------------------------
+# --- 2b. Food file ----------------------------------------------------------
 foods <- read_csv(file.path(curf_dir, "npa11bf.csv"),
                   show_col_types = FALSE) %>%
   select(ABSPID, DAYNUM, FOODCODC, GRAMWGT)
 
 cat("Food records loaded:", nrow(foods), "\n")
-cat("Day 1 records:", sum(foods$DAYNUM == 1), "\n")
-cat("Day 2 records:", sum(foods$DAYNUM == 2), "\n")
+cat("  Day 1 records:", sum(foods$DAYNUM == 1), "\n")
+cat("  Day 2 records:", sum(foods$DAYNUM == 2), "\n")
 
 # =============================================================================
-# SECTION 3: Create stratification variables on person file
+# SECTION 3: Stratification and person-level prep
 # =============================================================================
 
-# --- 3a. Age groups ---------------------------------------------------------
+# --- 3a. Exclude any participants aged <2 years (GBI age eligibility) -------
+n_under2 <- sum(persons$AGE < 2, na.rm = TRUE)
+if (n_under2 > 0) {
+  cat("\nExcluding", n_under2, "participants aged <2 years (GBI eligibility).\n")
+  persons <- persons %>% filter(AGE >= 2)
+}
+
+# --- 3b. Age groups (GBI bands 1-12) ----------------------------------------
 age_breaks <- c(2, 6, 11, 15, 20, 25, 35, 45, 55, 65, 75, 85, Inf)
-age_labels <- 1:12  # GBI codes: 1 = 2-5y, 2 = 6-10y, ..., 12 = 85-100y
+age_labels <- 1:12   # 1 = 2-5y, 2 = 6-10y, ..., 12 = 85+
 
 persons <- persons %>%
   mutate(
-    age_grp = cut(AGE,
-                  breaks = age_breaks,
-                  labels = age_labels,
-                  right = FALSE,
-                  include.lowest = TRUE) %>% as.integer()
+    age_grp = cut(AGE, breaks = age_breaks, labels = age_labels,
+                  right = FALSE, include.lowest = TRUE) %>% as.integer()
   )
 
-# Verify
 cat("\nAge group distribution:\n")
 persons %>% count(age_grp) %>% print()
 
-# --- 3b. Education level ----------------------------------------------------
-# GBI categories:
-#   1 = Primary (≤6 years formal education / ISCED 0-2)
-#   2 = Secondary (>6 to ≤12 years / ISCED 3-4)
-#   3 = Tertiary (>12 years / ISCED 5-8)
-#
-# Mapping from NNPAS:
-#   Tertiary: LVHNSQBC in 1-4 (postgrad, bachelor, diploma, cert III/IV)
-#   Secondary: HYSCHCBC in 1-3 (Year 10-12) AND no tertiary qual
-#   Primary: HYSCHCBC in 4-5 (Year 9 or below) AND no tertiary qual
-#
-# For children <15: HYSCHCBC=0, LVHNSQBC=0
-#   → Use education of the selected adult in the same household
-
-# First, classify adults (age >= 15)
+# --- 3c. Education level ----------------------------------------------------
+# Tertiary (3): LVHNSQBC 1-4 (postgrad, bachelor, diploma, cert III/IV)
+# Secondary (2): HYSCHCBC 1-3 (Year 10-12) with no tertiary qual
+# Primary  (1): HYSCHCBC 4-5 (Year 9 or below) with no tertiary qual
+# Children <15: highest adult education in the same household.
 persons <- persons %>%
   mutate(
     edu_level_own = case_when(
-      AGE < 15 ~ NA_integer_,
-      LVHNSQBC %in% 1:4 ~ 3L,                          # Tertiary
-      HYSCHCBC %in% 1:3 ~ 2L,                           # Secondary
-      HYSCHCBC %in% 4:5 ~ 1L,                           # Primary
-      # Edge cases: LVHNSQBC=8 (not determined), HYSCHCBC=0 for 15+ (shouldn't happen)
-      TRUE ~ 2L                                          # Default to Secondary
+      AGE < 15            ~ NA_integer_,
+      LVHNSQBC %in% 1:4   ~ 3L,
+      HYSCHCBC %in% 1:3   ~ 2L,
+      HYSCHCBC %in% 4:5   ~ 1L,
+      TRUE                ~ 2L
     )
   )
 
-# For children: assign education from an adult in the same household.
-# The NNPAS CURF includes all persons aged 2+ per household, so some
-# households have multiple adults. We take the highest education level
-# among adults in the household to assign to children.
 adult_edu <- persons %>%
   filter(AGE >= 15, !is.na(edu_level_own)) %>%
   group_by(ABSHID) %>%
@@ -177,296 +227,398 @@ adult_edu <- persons %>%
 
 persons <- persons %>%
   left_join(adult_edu, by = "ABSHID") %>%
-  mutate(
-    edu_level = if_else(AGE < 15, hh_adult_edu, edu_level_own)
-  )
+  mutate(edu_level = if_else(AGE < 15, hh_adult_edu, edu_level_own))
 
-# Check for any remaining NAs (children in households with no adult record)
 n_edu_na <- sum(is.na(persons$edu_level))
 if (n_edu_na > 0) {
-  cat("\nWARNING:", n_edu_na, "persons with missing education level — assigning to Secondary\n")
-  persons <- persons %>%
-    mutate(edu_level = replace_na(edu_level, 2L))
+  cat("\nWARNING:", n_edu_na, "persons with missing education -- defaulting to Secondary\n")
+  persons <- persons %>% mutate(edu_level = replace_na(edu_level, 2L))
 }
 
 cat("\nEducation level distribution:\n")
 persons %>% count(edu_level) %>% print()
 
-# --- 3c. Area of residence --------------------------------------------------
-# Urban (1) = Major cities (ARIABC=1) + Inner regional (ARIABC=2)
-# Rural (2) = Other (ARIABC=3)
+# --- 3d. Residence ----------------------------------------------------------
+# Urban (1) = Major cities + Inner regional (ARIABC 1-2)
+# Rural (2) = Other/remote (ARIABC 3)
 persons <- persons %>%
-  mutate(
-    residence = if_else(ARIABC %in% c(1, 2), 1L, 2L)
-  )
+  mutate(residence = if_else(ARIABC %in% c(1, 2), 1L, 2L))
 
 cat("\nResidence distribution:\n")
 persons %>% count(residence) %>% print()
 
-# --- 3d. Energy in kcal -----------------------------------------------------
-persons <- persons %>%
-  mutate(
-    energy_kcal_d1 = ENERGYT1 / 4.184,
-    energy_kcal_d2 = if_else(NUMRECAL == 2, ENERGYT2 / 4.184, NA_real_)
-  )
+# --- 3e. Lowercase sex for output -------------------------------------------
+persons <- persons %>% mutate(sex = as.integer(SEX))
 
 # =============================================================================
-# SECTION 4: Calculate person-level bread intake (g/day)
+# SECTION 4: Person-level bread intake (mean across all valid recall days)
 # =============================================================================
+# Per GBI 2026-05 spec:
+#   - Each valid recall day contributes to the person-level mean.
+#   - Days with zero bread intake are retained as true zero-intake days.
+#   - The same set of valid days must be used for bread and for energy.
+#
+# We treat a recall day as "valid" for a person if any food records exist
+# for that (ABSPID, DAYNUM) combination in the food file.
 
-# --- 4a. "Bread alone" — Day 1 ----------------------------------------------
-# Filter food file to Day 1, join to bread-alone classification
-bread_alone_d1 <- foods %>%
-  filter(DAYNUM == 1) %>%
-  inner_join(bread_alone_codes, by = "FOODCODC") %>%
+# --- 4a. Valid recall days per person ---------------------------------------
+person_recall_days <- foods %>%
+  distinct(ABSPID, DAYNUM) %>%
   group_by(ABSPID) %>%
   summarise(
-    ba_total_g  = sum(GRAMWGT, na.rm = TRUE),
-    ba_wg_g     = sum(GRAMWGT[bread_class == "wholegrain"], na.rm = TRUE),
-    ba_ref_g    = sum(GRAMWGT[bread_class == "refined"], na.rm = TRUE),
+    has_d1 = any(DAYNUM == 1),
+    has_d2 = any(DAYNUM == 2),
+    n_days = n_distinct(DAYNUM),
     .groups = "drop"
   )
 
-# --- 4b. "Bread alone" — Day 2 (for SD correction only) --------------------
-bread_alone_d2 <- foods %>%
-  filter(DAYNUM == 2) %>%
-  inner_join(bread_alone_codes, by = "FOODCODC") %>%
-  group_by(ABSPID) %>%
-  summarise(
-    ba_total_g_d2 = sum(GRAMWGT, na.rm = TRUE),
-    ba_wg_g_d2    = sum(GRAMWGT[bread_class == "wholegrain"], na.rm = TRUE),
-    ba_ref_g_d2   = sum(GRAMWGT[bread_class == "refined"], na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# --- 4c. "Bread all sources" — Day 1 ----------------------------------------
-# Join all food records to ADG bread content, calculate bread grams
-bread_allsrc_d1 <- foods %>%
-  filter(DAYNUM == 1) %>%
-  inner_join(adg_bread_content, by = "FOODCODC") %>%
-  mutate(
-    wg_bread_g  = GRAMWGT * adg_wg_bread / 100,
-    ref_bread_g = GRAMWGT * adg_ref_bread / 100
-  ) %>%
-  group_by(ABSPID) %>%
-  summarise(
-    bas_total_g = sum(wg_bread_g + ref_bread_g, na.rm = TRUE),
-    bas_wg_g    = sum(wg_bread_g, na.rm = TRUE),
-    bas_ref_g   = sum(ref_bread_g, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# --- 4d. "Bread all sources" — Day 2 (for SD correction only) ---------------
-bread_allsrc_d2 <- foods %>%
-  filter(DAYNUM == 2) %>%
-  inner_join(adg_bread_content, by = "FOODCODC") %>%
-  mutate(
-    wg_bread_g  = GRAMWGT * adg_wg_bread / 100,
-    ref_bread_g = GRAMWGT * adg_ref_bread / 100
-  ) %>%
-  group_by(ABSPID) %>%
-  summarise(
-    bas_total_g_d2 = sum(wg_bread_g + ref_bread_g, na.rm = TRUE),
-    bas_wg_g_d2    = sum(wg_bread_g, na.rm = TRUE),
-    bas_ref_g_d2   = sum(ref_bread_g, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# --- 4e. Merge bread intakes onto person file --------------------------------
-# Non-consumers get 0 (left join, then replace NA with 0)
 persons <- persons %>%
-  left_join(bread_alone_d1, by = "ABSPID") %>%
-  left_join(bread_alone_d2, by = "ABSPID") %>%
-  left_join(bread_allsrc_d1, by = "ABSPID") %>%
-  left_join(bread_allsrc_d2, by = "ABSPID") %>%
-  mutate(across(c(ba_total_g, ba_wg_g, ba_ref_g,
-                  ba_total_g_d2, ba_wg_g_d2, ba_ref_g_d2,
-                  bas_total_g, bas_wg_g, bas_ref_g,
-                  bas_total_g_d2, bas_wg_g_d2, bas_ref_g_d2),
+  left_join(person_recall_days, by = "ABSPID") %>%
+  mutate(
+    has_d1 = coalesce(has_d1, FALSE),
+    has_d2 = coalesce(has_d2, FALSE),
+    n_days = coalesce(n_days, 0L)
+  )
+
+cat("\nRecall-day coverage:\n")
+persons %>% count(has_d1, has_d2) %>% print()
+
+# Universe of (person, day) cells that must average into person means.
+recall_days_long <- foods %>% distinct(ABSPID, DAYNUM)
+
+# --- 4b. Bread alone per (person, day) --------------------------------------
+bread_alone_pd <- recall_days_long %>%
+  left_join(
+    foods %>%
+      filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
+      inner_join(bread_alone_classify %>% select(FOODCODC, bread_class),
+                 by = "FOODCODC") %>%
+      group_by(ABSPID, DAYNUM) %>%
+      summarise(
+        ba_total_g_d = sum(GRAMWGT, na.rm = TRUE),
+        ba_wg_g_d    = sum(GRAMWGT[bread_class == "wholegrain"], na.rm = TRUE),
+        ba_ref_g_d   = sum(GRAMWGT[bread_class == "refined"],    na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = c("ABSPID", "DAYNUM")
+  ) %>%
+  mutate(across(c(ba_total_g_d, ba_wg_g_d, ba_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-cat("\n--- Person-level bread intake summary (Day 1) ---\n")
-persons %>%
-  summarise(across(c(ba_total_g, ba_wg_g, ba_ref_g,
-                     bas_total_g, bas_wg_g, bas_ref_g),
-                   list(mean = mean, sd = sd, pct_zero = ~ mean(.x == 0) * 100),
-                   .names = "{.col}__{.fn}")) %>%
-  pivot_longer(everything(),
-               names_to = c("var", "stat"),
-               names_sep = "__") %>%
-  pivot_wider(names_from = stat, values_from = value) %>%
-  print(n = Inf)
+# --- 4c. Bread all sources per (person, day) (ADG disaggregation) -----------
+bread_allsrc_pd <- recall_days_long %>%
+  left_join(
+    foods %>%
+      filter(FOODCODC %in% all_bread_codes_2011_12) %>%
+      inner_join(adg_bread_content, by = "FOODCODC") %>%
+      mutate(
+        wg_g  = GRAMWGT * adg_wg_total  / 100,
+        ref_g = GRAMWGT * adg_ref_total / 100
+      ) %>%
+      group_by(ABSPID, DAYNUM) %>%
+      summarise(
+        bas_wg_g_d    = sum(wg_g,  na.rm = TRUE),
+        bas_ref_g_d   = sum(ref_g, na.rm = TRUE),
+        bas_total_g_d = bas_wg_g_d + bas_ref_g_d,
+        .groups = "drop"
+      ),
+    by = c("ABSPID", "DAYNUM")
+  ) %>%
+  mutate(across(c(bas_total_g_d, bas_wg_g_d, bas_ref_g_d),
+                ~ replace_na(.x, 0)))
 
-# =============================================================================
-# SECTION 5: SD correction — partition within/between-person variance
-# =============================================================================
-# Use ANOVA on persons with 2 recall days to estimate the ratio of
-# between-person variance to total variance. Apply this ratio to
-# deflate the Day 1 SD in each stratum.
-#
-# For each bread variable:
-#   Total variance = between-person var + within-person var
-#   Corrected SD = sqrt(between-person var) = sqrt(total var - within-person var)
-#
-# We estimate the variance ratio from the pooled 2-day subsample, then
-# apply it within each stratum.
+# --- 4d. Person-level means across valid recall days ------------------------
+bread_alone_person <- bread_alone_pd %>%
+  group_by(ABSPID) %>%
+  summarise(
+    ba_total_g = mean(ba_total_g_d),
+    ba_wg_g    = mean(ba_wg_g_d),
+    ba_ref_g   = mean(ba_ref_g_d),
+    .groups    = "drop"
+  )
 
-# Persons with 2 recall days
-two_day <- persons %>%
-  filter(NUMRECAL == 2)
+bread_allsrc_person <- bread_allsrc_pd %>%
+  group_by(ABSPID) %>%
+  summarise(
+    bas_total_g = mean(bas_total_g_d),
+    bas_wg_g    = mean(bas_wg_g_d),
+    bas_ref_g   = mean(bas_ref_g_d),
+    .groups     = "drop"
+  )
 
-cat("\nPersons with 2 recall days:", nrow(two_day), "\n")
+# --- 4e. Person-level mean energy (kcal/day) across the SAME recall days ----
+persons <- persons %>%
+  mutate(
+    energy_kcal_d1 = if_else(has_d1 & !is.na(ENERGYT1),
+                             ENERGYT1 / 4.184, NA_real_),
+    energy_kcal_d2 = if_else(has_d2 & !is.na(ENERGYT2),
+                             ENERGYT2 / 4.184, NA_real_),
+    mean_energy_kcal = case_when(
+      has_d1 & has_d2 & !is.na(energy_kcal_d1) & !is.na(energy_kcal_d2) ~
+        (energy_kcal_d1 + energy_kcal_d2) / 2,
+      has_d1 & !is.na(energy_kcal_d1) ~ energy_kcal_d1,
+      has_d2 & !is.na(energy_kcal_d2) ~ energy_kcal_d2,
+      TRUE                            ~ NA_real_
+    )
+  )
 
-# Function to estimate between-person variance ratio from 2-day data
-# Returns ratio = var_between / var_total (pooled across all persons)
-calc_bp_var_ratio <- function(day1, day2) {
-  # Stack into long format for one-way ANOVA
-  n <- length(day1)
-  if (n < 2) return(1)  # fallback if too few
+# --- 4f. Merge bread intakes onto persons; non-recall persons get NA --------
+persons <- persons %>%
+  left_join(bread_alone_person,   by = "ABSPID") %>%
+  left_join(bread_allsrc_person,  by = "ABSPID")
 
-  person_mean <- (day1 + day2) / 2
-  grand_mean  <- mean(person_mean)
-
-  # Between-person sum of squares
-  ss_between <- 2 * sum((person_mean - grand_mean)^2)
-  # Within-person sum of squares
-  ss_within  <- sum((day1 - person_mean)^2 + (day2 - person_mean)^2)
-  # Mean squares
-  ms_between <- ss_between / (n - 1)
-  ms_within  <- ss_within / n    # df_within = n (each person contributes 1 df)
-
-  # Variance components
-  var_within  <- ms_within
-  var_between <- max((ms_between - ms_within) / 2, 0)  # ensure non-negative
-
-  var_total <- var_between + var_within
-  if (var_total == 0) return(1)
-
-  return(var_between / var_total)
+# Persons with no recall days at all (n_days == 0) have NA bread intake;
+# everyone else either consumed bread on >=1 day or had a recorded recall
+# with no bread (true zero). Treat the latter as 0 g/day. Drop the former
+# from analyses since neither bread nor energy can be computed.
+n_no_recall <- sum(persons$n_days == 0L)
+if (n_no_recall > 0) {
+  cat("\nExcluding", n_no_recall, "persons with no recall days at all.\n")
+  persons <- persons %>% filter(n_days > 0L)
 }
 
-# Calculate variance ratios for each bread variable
+# =============================================================================
+# SECTION 5: Schofield BMR and Goldberg-style energy plausibility flag
+# =============================================================================
+# Schofield (1985) weight-only equations, MJ/day. Converted to kcal/day
+# using 1 MJ = 239.006 kcal.
+#
+# Goldberg cutoffs: flag persons with EI:BMR < 0.9 or > 2.4 as implausible.
+# Per agreed instruction, pregnant women and children <10 years are
+# exempt from this filter and are always retained as plausible.
+
+schofield_bmr_mj <- function(weight_kg, age, sex) {
+  case_when(
+    is.na(weight_kg) | is.na(age) | is.na(sex)        ~ NA_real_,
+    sex == 1L & age <  3                              ~ 0.249 * weight_kg - 0.127,
+    sex == 1L & age >=  3 & age < 10                  ~ 0.095 * weight_kg + 2.110,
+    sex == 1L & age >= 10 & age < 18                  ~ 0.074 * weight_kg + 2.754,
+    sex == 1L & age >= 18 & age < 30                  ~ 0.063 * weight_kg + 2.896,
+    sex == 1L & age >= 30 & age < 60                  ~ 0.048 * weight_kg + 3.653,
+    sex == 1L & age >= 60                             ~ 0.049 * weight_kg + 2.459,
+    sex == 2L & age <  3                              ~ 0.244 * weight_kg - 0.130,
+    sex == 2L & age >=  3 & age < 10                  ~ 0.085 * weight_kg + 2.033,
+    sex == 2L & age >= 10 & age < 18                  ~ 0.056 * weight_kg + 2.898,
+    sex == 2L & age >= 18 & age < 30                  ~ 0.062 * weight_kg + 2.036,
+    sex == 2L & age >= 30 & age < 60                  ~ 0.034 * weight_kg + 3.538,
+    sex == 2L & age >= 60                             ~ 0.038 * weight_kg + 2.755,
+    TRUE                                              ~ NA_real_
+  )
+}
+
+persons <- persons %>%
+  mutate(
+    bmr_kcal = schofield_bmr_mj(PHDKGWBC, AGE, sex) * 239.006,
+    ei_bmr_ratio = if_else(!is.na(bmr_kcal) & bmr_kcal > 0,
+                           mean_energy_kcal / bmr_kcal, NA_real_),
+    pregnant_flag = !is.na(PREGNANT) & PREGNANT == 1,
+    energy_implausible = case_when(
+      AGE < 10                                ~ FALSE,
+      pregnant_flag                           ~ FALSE,
+      is.na(ei_bmr_ratio)                     ~ FALSE,  # can't screen -> retain
+      ei_bmr_ratio < 0.9 | ei_bmr_ratio > 2.4 ~ TRUE,
+      TRUE                                    ~ FALSE
+    )
+  )
+
+n_impl     <- sum(persons$energy_implausible, na.rm = TRUE)
+n_bmr_miss <- sum(is.na(persons$bmr_kcal))
+cat("\nEnergy plausibility (Schofield BMR + Goldberg <0.9 or >2.4):\n")
+cat("  BMR not calculable:        ", n_bmr_miss, "(retained for unadjusted)\n")
+cat("  Flagged implausible:       ", n_impl,
+    sprintf("(%.1f%% of those screened)\n",
+            100 * n_impl / max(1, sum(!is.na(persons$energy_implausible)))))
+cat("  Exempt (preg or AGE<10):   ",
+    sum((persons$AGE < 10) | persons$pregnant_flag), "\n")
+
+# =============================================================================
+# SECTION 6: Energy adjustment (residual method, log-log, pooled per outcome)
+# =============================================================================
+# Per GBI 2026-05 spec:
+#   - For each bread outcome, fit log(bread) ~ log(energy_kcal) on consumers
+#     (mean bread > 0) who have valid mean energy AND are not flagged as
+#     implausible energy reporters. Regression is unweighted (Step 20).
+#   - Standardize: log(bread)_adj = log(bread) - beta * (log(energy) - log(2000))
+#     then exponentiate.
+#   - Non-consumers have adjusted intake set to 0 g/day.
+#   - Persons with NA bread (no recall) or NA energy or implausible energy
+#     have NA adjusted intake -- excluded from EA stratum estimates only.
+
 bread_vars <- c("ba_total_g", "ba_wg_g", "ba_ref_g",
                 "bas_total_g", "bas_wg_g", "bas_ref_g")
-bread_vars_d2 <- paste0(bread_vars, "_d2")
+ea_ref_kcal <- 2000
 
-var_ratios <- tibble(
-  var_name = bread_vars,
-  bp_var_ratio = map2_dbl(
-    bread_vars, bread_vars_d2,
-    ~ calc_bp_var_ratio(two_day[[.x]], two_day[[.y]])
+energy_adjust_residual <- function(bread_g, energy_kcal, implausible) {
+  ea <- rep(NA_real_, length(bread_g))
+  # Assign 0 to non-consumers FIRST, so they stay in the EA stratum
+  # estimates even when too few consumers exist to fit a residual model.
+  non_consumer <- !is.na(bread_g) & bread_g == 0
+  ea[non_consumer] <- 0
+  consumer_eligible <- !is.na(bread_g) & bread_g > 0 &
+                       !is.na(energy_kcal) & energy_kcal > 0 &
+                       !is.na(implausible) & !implausible
+  if (sum(consumer_eligible) < 10) {
+    warning("Too few consumers (", sum(consumer_eligible),
+            ") for energy adjustment; non-consumers still recorded as 0.")
+    return(ea)
+  }
+  log_b <- log(bread_g[consumer_eligible])
+  log_e <- log(energy_kcal[consumer_eligible])
+  fit   <- lm(log_b ~ log_e)
+  beta  <- unname(coef(fit)[2])
+  log_adj <- log_b - beta * (log_e - log(ea_ref_kcal))
+  ea[consumer_eligible] <- exp(log_adj)
+  ea
+}
+
+for (vn in bread_vars) {
+  ea_col <- paste0(vn, "_ea")
+  persons[[ea_col]] <- energy_adjust_residual(
+    persons[[vn]], persons$mean_energy_kcal, persons$energy_implausible
   )
-)
-
-cat("\nBetween-person variance ratios (pooled):\n")
-print(var_ratios)
+  cat(sprintf("  EA %-12s n_modelled=%d  n_zero=%d  n_na=%d\n",
+              vn,
+              sum(!is.na(persons[[ea_col]]) & persons[[ea_col]] > 0),
+              sum(!is.na(persons[[ea_col]]) & persons[[ea_col]] == 0),
+              sum(is.na(persons[[ea_col]]))))
+}
 
 # =============================================================================
-# SECTION 6: Set up survey design
+# SECTION 7: Survey design (jackknife replicates)
 # =============================================================================
-# The NNPAS Basic CURF provides 60 jackknife replicate weights (WPM0101-WPM0160)
-# for variance estimation.
-
 rep_wt_cols <- paste0("WPM01", sprintf("%02d", 1:60))
 
 svy_design <- persons %>%
   as_survey_rep(
-    weights = NPAFINWT,
+    weights    = NPAFINWT,
     repweights = all_of(rep_wt_cols),
-    type = "JKn",
-    scale = 59/60,       # standard jackknife scaling for 60 replicates
-    rscales = rep(1, 60)
+    type       = "JKn",
+    scale      = 59/60,
+    rscales    = rep(1, 60)
   )
 
 cat("\nSurvey design created with", length(rep_wt_cols), "replicate weights\n")
 
 # =============================================================================
-# SECTION 7: Compute aggregate estimates for each stratum
+# SECTION 8: Stratum-level estimates
 # =============================================================================
-
-# Function to produce GBI estimates for one bread definition × bread subtype
-# across all strata defined by grouping variables.
+# For each (bread definition, bread subtype, energy adjustment, stratum):
+#   - n: unweighted persons contributing to the estimate
+#   - mean_g, se_g: weighted mean and jackknife SE of person-level intake
+#   - sd_g: weighted empirical SD of person-level intakes
+#   - pct_non_consumers: weighted % whose person-level mean intake = 0
+#   - mean_kcal, sd_kcal: weighted mean and SD of person-level mean energy
+#                          (computed among persons with valid energy)
 #
-# Args:
-#   svy        - srvyr survey design object (built from persons data)
-#   person_df  - the underlying persons data frame (for weighted SD calc)
-#   intake_var - column name of the bread intake variable
-#   grp_vars   - character vector of grouping variable names (can be empty)
-#   var_ratio  - between-person variance ratio for SD correction
-#
-# Returns a tibble with: grouping vars, n, mean_g, sd_g, se_g,
-#                         pct_non_consumers, mean_kcal
+# For energy-adjusted (energy_adj == 2) outputs, persons whose adjusted
+# intake is NA (implausible or missing energy) are filtered out before
+# survey estimation, per PDF Section 4.2 step 20.
 
-compute_estimates <- function(svy, person_df, intake_var, grp_vars, var_ratio) {
-
-  # Handle the ungrouped case (population total) explicitly
-  if (length(grp_vars) == 0) {
-    mean_est <- svy %>%
-      summarise(
-        n          = unweighted(n()),
-        mean_g     = survey_mean(.data[[intake_var]], na.rm = TRUE, vartype = "se"),
-        mean_kcal  = survey_mean(energy_kcal_d1, na.rm = TRUE, vartype = "se"),
-        pct_non_consumers = survey_mean(.data[[intake_var]] == 0, na.rm = TRUE,
-                                         vartype = "se"),
-        .groups = "drop"
-      )
-  } else {
-    mean_est <- svy %>%
-      group_by(across(all_of(grp_vars))) %>%
-      summarise(
-        n          = unweighted(n()),
-        mean_g     = survey_mean(.data[[intake_var]], na.rm = TRUE, vartype = "se"),
-        mean_kcal  = survey_mean(energy_kcal_d1, na.rm = TRUE, vartype = "se"),
-        pct_non_consumers = survey_mean(.data[[intake_var]] == 0, na.rm = TRUE,
-                                         vartype = "se"),
-        .groups = "drop"
-      )
-  }
-
-  mean_est <- mean_est %>%
-    rename(se_g = mean_g_se) %>%
-    select(-mean_kcal_se, -pct_non_consumers_se)
-
-  # Weighted SD (Day 1), corrected for within-person variance
-  # Weighted variance: sum(w * (x - xbar)^2) / (sum(w) - 1)
-  calc_weighted_sd <- function(df) {
-    x <- df[[intake_var]]
-    w <- df[["NPAFINWT"]]
-    wm <- weighted.mean(x, w, na.rm = TRUE)
-    sd_raw <- sqrt(sum(w * (x - wm)^2, na.rm = TRUE) / (sum(w, na.rm = TRUE) - 1))
-    sd_raw * sqrt(var_ratio)
-  }
-
-  if (length(grp_vars) == 0) {
-    sd_est <- tibble(sd_g = calc_weighted_sd(person_df))
-  } else {
-    sd_est <- person_df %>%
-      group_by(across(all_of(grp_vars))) %>%
-      group_modify(~ tibble(sd_g = calc_weighted_sd(.x))) %>%
-      ungroup()
-  }
-
-  # Merge
-  if (length(grp_vars) == 0) {
-    result <- bind_cols(mean_est, sd_est)
-  } else {
-    result <- mean_est %>%
-      left_join(sd_est, by = grp_vars)
-  }
-
-  result <- result %>%
-    mutate(
-      pct_non_consumers = pct_non_consumers * 100,
-      mean_kcal = round(mean_kcal, 1)
-    ) %>%
-    select(any_of(grp_vars), n, mean_g, sd_g, se_g, pct_non_consumers, mean_kcal)
-
-  return(result)
+calc_weighted_sd <- function(x, w) {
+  x <- as.numeric(x); w <- as.numeric(w)
+  keep <- !is.na(x) & !is.na(w) & w > 0
+  if (sum(keep) < 2) return(NA_real_)
+  x <- x[keep]; w <- w[keep]
+  wm <- sum(w * x) / sum(w)
+  sqrt(sum(w * (x - wm)^2) / (sum(w) - 1))
 }
 
-# --- Define all strata combinations -----------------------------------------
+compute_estimates <- function(svy, person_df, intake_var, grp_vars) {
+  # Filter persons to non-NA intake (EA variables are NA when energy is
+  # missing/implausible). Rebuild a subset survey design from the filtered
+  # data rather than `svy %>% filter()`: the latter can throw
+  # "subscript out of bounds" in srvyr's `unweighted(n())` when subsequent
+  # group_by() operations encounter groups whose cached split indices are
+  # stale after the filter.
+  pers_f <- person_df %>% filter(!is.na(.data[[intake_var]]))
+  pers_e <- person_df %>% filter(!is.na(mean_energy_kcal))
+  # If the intake variable is entirely NA (e.g. an EA outcome where no
+  # persons were modellable AND no persons are non-consumers), there is
+  # nothing to estimate -- return an empty tibble with the right schema.
+  if (nrow(pers_f) == 0) {
+    cols <- list()
+    for (g in grp_vars) cols[[g]] <- integer(0)
+    cols$n <- integer(0); cols$mean_g <- numeric(0)
+    cols$sd_g <- numeric(0); cols$se_g <- numeric(0)
+    cols$pct_non_consumers <- numeric(0)
+    cols$mean_kcal <- numeric(0); cols$sd_kcal <- numeric(0)
+    return(tibble::as_tibble(cols))
+  }
+  rep_cols <- grep("^WPM01[0-9]{2}$", names(pers_f), value = TRUE)
+  build_subset_design <- function(df) {
+    # Defensive: drop any NA/zero weights and coerce labelled vectors to
+    # plain numeric. `combined.weights = TRUE` is passed explicitly because
+    # NNPAS WPM01xx replicates already incorporate the base weight, AND
+    # because survey::svrepdesign()'s auto-detection (mean(repweights[,1])
+    # > 1) can return NA on filtered subsets and crash with
+    # "missing value where TRUE/FALSE needed".
+    df <- df %>% filter(!is.na(NPAFINWT), NPAFINWT > 0) %>%
+      mutate(NPAFINWT = as.numeric(NPAFINWT),
+             across(all_of(rep_cols), as.numeric))
+    df %>%
+      as_survey_rep(weights = NPAFINWT, repweights = all_of(rep_cols),
+                    type = "JKn", scale = 59/60, rscales = rep(1, 60),
+                    combined.weights = TRUE)
+  }
+  svy_f <- build_subset_design(pers_f)
+  svy_e <- build_subset_design(pers_e)
 
-# Map from internal variable names to GBI bread_subtype codes
+  if (length(grp_vars) == 0) {
+    mean_est <- svy_f %>%
+      summarise(
+        n                 = unweighted(n()),
+        mean_g            = survey_mean(.data[[intake_var]], na.rm = TRUE,
+                                        vartype = "se"),
+        pct_non_consumers = survey_mean(.data[[intake_var]] == 0,
+                                        na.rm = TRUE, vartype = NULL)
+      )
+    eng_est <- svy_e %>%
+      summarise(mean_kcal = survey_mean(mean_energy_kcal, na.rm = TRUE,
+                                        vartype = NULL))
+    sd_est  <- tibble(
+      sd_g    = calc_weighted_sd(pers_f[[intake_var]], pers_f$NPAFINWT),
+      sd_kcal = calc_weighted_sd(pers_e$mean_energy_kcal, pers_e$NPAFINWT)
+    )
+    result <- bind_cols(mean_est, eng_est, sd_est)
+  } else {
+    mean_est <- svy_f %>%
+      group_by(across(all_of(grp_vars))) %>%
+      summarise(
+        n                 = unweighted(n()),
+        mean_g            = survey_mean(.data[[intake_var]], na.rm = TRUE,
+                                        vartype = "se"),
+        pct_non_consumers = survey_mean(.data[[intake_var]] == 0,
+                                        na.rm = TRUE, vartype = NULL),
+        .groups = "drop"
+      )
+    eng_est <- svy_e %>%
+      group_by(across(all_of(grp_vars))) %>%
+      summarise(mean_kcal = survey_mean(mean_energy_kcal, na.rm = TRUE,
+                                        vartype = NULL),
+                .groups = "drop")
+    sd_est <- pers_f %>%
+      group_by(across(all_of(grp_vars))) %>%
+      group_modify(~ tibble(
+        sd_g = calc_weighted_sd(.x[[intake_var]], .x$NPAFINWT)
+      )) %>% ungroup()
+    sd_e_est <- pers_e %>%
+      group_by(across(all_of(grp_vars))) %>%
+      group_modify(~ tibble(
+        sd_kcal = calc_weighted_sd(.x$mean_energy_kcal, .x$NPAFINWT)
+      )) %>% ungroup()
+    result <- mean_est %>%
+      left_join(eng_est,  by = grp_vars) %>%
+      left_join(sd_est,   by = grp_vars) %>%
+      left_join(sd_e_est, by = grp_vars)
+  }
+
+  result %>%
+    rename(se_g = mean_g_se) %>%
+    mutate(pct_non_consumers = pct_non_consumers * 100) %>%
+    select(any_of(grp_vars), n, mean_g, sd_g, se_g,
+           pct_non_consumers, mean_kcal, sd_kcal)
+}
+
 bread_subtype_map <- list(
   ba_total_g  = list(bread_def = 1L, bread_subtype = 0L, var_name = "ba_total_g"),
   ba_wg_g     = list(bread_def = 1L, bread_subtype = 1L, var_name = "ba_wg_g"),
@@ -475,257 +627,104 @@ bread_subtype_map <- list(
   bas_wg_g    = list(bread_def = 2L, bread_subtype = 1L, var_name = "bas_wg_g"),
   bas_ref_g   = list(bread_def = 2L, bread_subtype = 2L, var_name = "bas_ref_g")
 )
-
-# --- 7a. Fully stratified estimates (age × sex × education × residence) -----
-cat("\n--- Computing fully stratified estimates ---\n")
-
-# Rename SEX to sex in persons and survey design so output columns are consistent
-persons <- persons %>% rename(sex = SEX)
-svy_design <- persons %>%
-  as_survey_rep(
-    weights = NPAFINWT,
-    repweights = all_of(rep_wt_cols),
-    type = "JKn",
-    scale = 59/60,
-    rscales = rep(1, 60)
-  )
+ea_subtype_map <- map(bread_subtype_map, function(info) {
+  modifyList(info, list(var_name = paste0(info$var_name, "_ea")))
+})
 
 grp_full <- c("sex", "residence", "edu_level", "age_grp")
 
-results_full <- map_dfr(bread_subtype_map, function(info) {
-  cat("  ", info$var_name, "\n")
-  vr <- var_ratios %>% filter(var_name == info$var_name) %>% pull(bp_var_ratio)
-
-  compute_estimates(svy_design, persons, info$var_name, grp_full, vr) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 1L
-    )
-})
-
-# --- 7b. Age × Sex only estimates (including sex-combined) ------------------
-cat("\n--- Computing age × sex estimates ---\n")
-
-# Male and Female separately, by age group
-results_agesex <- map_dfr(bread_subtype_map, function(info) {
-  cat("  ", info$var_name, "\n")
-  vr <- var_ratios %>% filter(var_name == info$var_name) %>% pull(bp_var_ratio)
-
-  compute_estimates(svy_design, persons, info$var_name, c("sex", "age_grp"), vr) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 1L,
-      residence     = NA_integer_,
-      edu_level     = NA_integer_
-    )
-})
-
-# Sex-combined (sex = 0) by age group
-results_sexcomb <- map_dfr(bread_subtype_map, function(info) {
-  vr <- var_ratios %>% filter(var_name == info$var_name) %>% pull(bp_var_ratio)
-
-  compute_estimates(svy_design, persons, info$var_name, "age_grp", vr) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 1L,
-      sex           = 0L,
-      residence     = NA_integer_,
-      edu_level     = NA_integer_
-    )
-})
-
-# Total (all ages) for age×sex outputs (age_grp = 0)
-results_total_agesex <- map_dfr(bread_subtype_map, function(info) {
-  vr <- var_ratios %>% filter(var_name == info$var_name) %>% pull(bp_var_ratio)
-
-  # Male, Female for Total (all ages)
-  by_sex <- compute_estimates(svy_design, persons, info$var_name, "sex", vr) %>%
-    mutate(age_grp = 0L)
-
-  # Sex-combined for Total (all ages)
-  overall <- compute_estimates(svy_design, persons, info$var_name, character(0), vr) %>%
-    mutate(age_grp = 0L, sex = 0L)
-
-  bind_rows(by_sex, overall) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 1L,
-      residence     = NA_integer_,
-      edu_level     = NA_integer_
-    )
-})
-
-results_agesex_all <- bind_rows(results_agesex, results_sexcomb,
-                                results_total_agesex)
-
-# =============================================================================
-# SECTION 8: Energy adjustment (residual method)
-# =============================================================================
-# For each bread variable, within the full sample:
-#   1. Regress bread intake (or log(bread+0.00001)) on total energy (kcal)
-#   2. Get residuals
-#   3. Predict bread at 2000 kcal, add to residuals
-#   4. Exponentiate if log-transformed
-#   5. Report mean/SD of energy-adjusted values per stratum
-
-cat("\n--- Computing energy-adjusted estimates ---\n")
-
-energy_adjust <- function(bread_g, energy_kcal) {
-  # Check if log transformation is needed (Shapiro-Wilk on subsample)
-  use_log <- FALSE
-  test_sample <- bread_g[bread_g > 0]
-  if (length(test_sample) > 10) {
-    sw <- shapiro.test(sample(test_sample, min(5000, length(test_sample))))
-    if (sw$p.value < 0.05) use_log <- TRUE
-  }
-
-  if (use_log) {
-    y <- log(bread_g + 0.00001)
-  } else {
-    y <- bread_g
-  }
-
-  fit <- lm(y ~ energy_kcal)
-  residuals <- residuals(fit)
-  predicted_2000 <- predict(fit, newdata = data.frame(energy_kcal = 2000))
-  ea_values <- residuals + predicted_2000
-
-  if (use_log) {
-    ea_values <- exp(ea_values)
-  }
-
-  return(ea_values)
+# Helper: build the full slate of stratum cuts for a single bread variable.
+build_all_strata <- function(var_name, energy_adj_code, info) {
+  full <- compute_estimates(svy_design, persons, var_name, grp_full) %>%
+    mutate(bread_def = info$bread_def, bread_subtype = info$bread_subtype,
+           energy_adj = energy_adj_code)
+  agesex_m_f <- compute_estimates(svy_design, persons, var_name,
+                                  c("sex", "age_grp")) %>%
+    mutate(residence = NA_integer_, edu_level = NA_integer_,
+           bread_def = info$bread_def, bread_subtype = info$bread_subtype,
+           energy_adj = energy_adj_code)
+  agesex_comb <- compute_estimates(svy_design, persons, var_name, "age_grp") %>%
+    mutate(sex = 0L, residence = NA_integer_, edu_level = NA_integer_,
+           bread_def = info$bread_def, bread_subtype = info$bread_subtype,
+           energy_adj = energy_adj_code)
+  total_by_sex <- compute_estimates(svy_design, persons, var_name, "sex") %>%
+    mutate(age_grp = 0L, residence = NA_integer_, edu_level = NA_integer_,
+           bread_def = info$bread_def, bread_subtype = info$bread_subtype,
+           energy_adj = energy_adj_code)
+  total_overall <- compute_estimates(svy_design, persons, var_name,
+                                     character(0)) %>%
+    mutate(sex = 0L, age_grp = 0L, residence = NA_integer_,
+           edu_level = NA_integer_,
+           bread_def = info$bread_def, bread_subtype = info$bread_subtype,
+           energy_adj = energy_adj_code)
+  bind_rows(full, agesex_m_f, agesex_comb, total_by_sex, total_overall)
 }
 
-# Apply energy adjustment to each bread variable
-for (var_name in bread_vars) {
-  ea_col <- paste0(var_name, "_ea")
-  persons[[ea_col]] <- energy_adjust(persons[[var_name]], persons$energy_kcal_d1)
-  cat("  Energy-adjusted:", var_name, "→", ea_col, "\n")
-}
-
-# Rebuild survey design with energy-adjusted variables added
-svy_design <- persons %>%
-  as_survey_rep(
-    weights = NPAFINWT,
-    repweights = all_of(rep_wt_cols),
-    type = "JKn",
-    scale = 59/60,
-    rscales = rep(1, 60)
-  )
-
-# EA variable mapping
-ea_subtype_map <- list(
-  ba_total_g_ea  = list(bread_def = 1L, bread_subtype = 0L, var_name = "ba_total_g_ea",
-                        orig_var = "ba_total_g"),
-  ba_wg_g_ea     = list(bread_def = 1L, bread_subtype = 1L, var_name = "ba_wg_g_ea",
-                         orig_var = "ba_wg_g"),
-  ba_ref_g_ea    = list(bread_def = 1L, bread_subtype = 2L, var_name = "ba_ref_g_ea",
-                          orig_var = "ba_ref_g"),
-  bas_total_g_ea = list(bread_def = 2L, bread_subtype = 0L, var_name = "bas_total_g_ea",
-                         orig_var = "bas_total_g"),
-  bas_wg_g_ea    = list(bread_def = 2L, bread_subtype = 1L, var_name = "bas_wg_g_ea",
-                          orig_var = "bas_wg_g"),
-  bas_ref_g_ea   = list(bread_def = 2L, bread_subtype = 2L, var_name = "bas_ref_g_ea",
-                           orig_var = "bas_ref_g")
-)
-
-# Fully stratified EA estimates
-results_full_ea <- map_dfr(ea_subtype_map, function(info) {
-  cat("  EA fully stratified:", info$var_name, "\n")
-  vr <- var_ratios %>% filter(var_name == info$orig_var) %>% pull(bp_var_ratio)
-
-  compute_estimates(svy_design, persons, info$var_name, grp_full, vr) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 2L
-    )
+cat("\n--- Computing unadjusted stratum estimates ---\n")
+results_unadj <- map_dfr(bread_subtype_map, function(info) {
+  cat("  ", info$var_name, "\n")
+  build_all_strata(info$var_name, 1L, info)
 })
 
-# Age × Sex EA estimates (Male, Female, Sex-combined, plus Total all ages)
-results_agesex_ea <- map_dfr(ea_subtype_map, function(info) {
-  vr <- var_ratios %>% filter(var_name == info$orig_var) %>% pull(bp_var_ratio)
-
-  bind_rows(
-    # By sex and age_grp
-    compute_estimates(svy_design, persons, info$var_name, c("sex", "age_grp"), vr),
-    # Sex-combined by age_grp
-    compute_estimates(svy_design, persons, info$var_name, "age_grp", vr) %>%
-      mutate(sex = 0L),
-    # Total (all ages) by sex
-    compute_estimates(svy_design, persons, info$var_name, "sex", vr) %>%
-      mutate(age_grp = 0L),
-    # Total (all ages), sex-combined
-    compute_estimates(svy_design, persons, info$var_name, character(0), vr) %>%
-      mutate(age_grp = 0L, sex = 0L)
-  ) %>%
-    mutate(
-      bread_def     = info$bread_def,
-      bread_subtype = info$bread_subtype,
-      energy_adj    = 2L,
-      residence     = NA_integer_,
-      edu_level     = NA_integer_
-    )
+cat("\n--- Computing energy-adjusted stratum estimates ---\n")
+results_ea <- map_dfr(ea_subtype_map, function(info) {
+  cat("  ", info$var_name, "\n")
+  build_all_strata(info$var_name, 2L, info)
 })
 
 # =============================================================================
 # SECTION 9: Assemble final output
 # =============================================================================
+ba_notes <- paste(
+  "Bread alone = explicit AUSNUT 2011-13 code list:",
+  "12201001-12203017, 12203022-12305006, 12307001-12307004,",
+  "13201001, 13201002, 13201010, 13201012,",
+  "13203001, 13203002, 13205003.",
+  "Bread all sources = bread-alone list plus mixed-dish codes",
+  "(13503001-13507004, 13507014-13507036, 13508012),",
+  "with bread g disaggregated via ADG columns 1011/1015/1017 (wholegrain)",
+  "and 1021/1025/1027 (refined).",
+  "Person-level mean intake averaged across all valid recall days,",
+  "with 0-intake days retained.",
+  "Energy adjustment: residual method, log(bread) ~ log(energy),",
+  "fitted unweighted on consumers only, standardized to 2000 kcal/day;",
+  "non-consumers assigned 0 g/day adjusted intake.",
+  "Energy plausibility: Schofield BMR + Goldberg EI:BMR <0.9 or >2.4;",
+  "pregnant women and children <10y exempt.",
+  "Urban = ARIABC 1-2 (Major cities + Inner regional);",
+  "Rural = ARIABC 3 (Other/remote).",
+  "Education for children <15 assigned from highest-educated household adult."
+)
 
-cat("\n--- Assembling final output ---\n")
-
-final_output <- bind_rows(
-  results_full,         # Block 1 & 2: Non-EA, fully stratified
-  results_agesex_all,   # Block 5 & 7: Non-EA, age×sex only
-  results_full_ea,      # Block 3 & 4: EA, fully stratified
-  results_agesex_ea     # Block 6 & 8: EA, age×sex only
-) %>%
+final_output <- bind_rows(results_unadj, results_ea) %>%
   mutate(
     survey_name = "National Nutrition and Physical Activity Survey",
     year_start  = 2011L,
     year_end    = 2012L,
-    notes       = case_when(
-      bread_def == 1 & energy_adj == 1 ~
-        paste("Bread alone includes all AUSNUT 2011-13 codes 12201001-12307004",
-              "(standalone bread products including bagels, rolls, flatbreads,",
-              "English muffins, sweet buns, garlic bread).",
-              "Urban = Major cities + Inner regional (ARIABC 1-2);",
-              "Rural = Other (ARIABC 3).",
-              "Education for children <15 assigned from the highest-educated",
-              "adult in the household."),
-      TRUE ~ NA_character_
-    )
-  ) %>%
-  # Round numeric columns
-  mutate(
+    notes       = if_else(bread_def == 1 & energy_adj == 1, ba_notes,
+                          NA_character_),
     mean_g            = round(mean_g, 1),
     sd_g              = round(sd_g, 1),
     se_g              = round(se_g, 2),
-    pct_non_consumers = round(pct_non_consumers, 1)
+    pct_non_consumers = round(pct_non_consumers, 1),
+    mean_kcal         = round(mean_kcal, 1),
+    sd_kcal           = round(sd_kcal, 1)
   ) %>%
-  # Select and order columns to match Data_Template
   select(
     survey_name, year_start, year_end,
     bread_def, bread_subtype, energy_adj,
     sex, residence, edu_level, age_grp,
-    n, mean_g, sd_g, se_g, pct_non_consumers, mean_kcal,
+    n, mean_g, sd_g, se_g, pct_non_consumers,
+    mean_kcal, sd_kcal,
     notes
   ) %>%
-  arrange(
-    energy_adj, bread_def, bread_subtype,
-    desc(!is.na(residence)),  # fully stratified first
-    sex, residence, edu_level, age_grp
-  )
+  arrange(energy_adj, bread_def, bread_subtype,
+          desc(!is.na(residence)),
+          sex, residence, edu_level, age_grp)
 
 # =============================================================================
-# SECTION 10: QC checks
+# SECTION 10: QC
 # =============================================================================
-
 cat("\n=== FINAL OUTPUT SUMMARY ===\n")
 cat("Total rows:", nrow(final_output), "\n\n")
 
@@ -733,11 +732,7 @@ final_output %>%
   count(bread_def, energy_adj, is_fully_strat = !is.na(residence)) %>%
   print()
 
-# --- QC: Total bread ≈ WG + Refined within each stratum --------------------
-# Only applies to non-energy-adjusted estimates (energy_adj==1).
-# Energy adjustment runs separate regressions, so additivity doesn't hold.
-cat("\n--- QC: Total bread = WG + Refined (non-energy-adjusted only) ---\n")
-
+cat("\n--- QC: Unadjusted Total = WG + Refined (within stratum) ---\n")
 qc <- final_output %>%
   filter(energy_adj == 1) %>%
   select(bread_def, energy_adj, sex, residence, edu_level, age_grp,
@@ -745,173 +740,228 @@ qc <- final_output %>%
   pivot_wider(names_from = bread_subtype, values_from = mean_g,
               names_prefix = "bt_") %>%
   mutate(diff = bt_0 - (bt_1 + bt_2))
+cat("Max absolute difference (unadjusted):",
+    max(abs(qc$diff), na.rm = TRUE), "g/day\n")
+cat("(Should be <=0.2 -- rounding artefact only.\n",
+    " EA estimates are not expected to be additive per GBI spec.)\n")
 
-cat("Max absolute difference:", max(abs(qc$diff), na.rm = TRUE), "g/day\n")
-cat("(Should be ≤0.2 — rounding artefact only)\n")
-
-# --- QC: Sample size -------------------------------------------------------
 cat("\nMax n in any stratum:", max(final_output$n, na.rm = TRUE), "\n")
-cat("Total persons in sample:", nrow(persons), "\n")
+cat("Total persons in analytic sample:", nrow(persons), "\n")
 if (max(final_output$n, na.rm = TRUE) > nrow(persons)) {
-  warning("n exceeds sample size — possible duplication issue!")
+  warning("n exceeds sample size -- possible duplication issue!")
 }
 
 # =============================================================================
-# SECTION 11: Export CSV
+# SECTION 11: Statistical Disclosure Control (cell suppression flags)
 # =============================================================================
+# suppress = "P": primary suppression (n < MIN_CELL_N)
+# suppress = "S": secondary suppression (prevents back-calculation via total)
+#
+# Additive relationships guarded:
+#   (1) bread_subtype: 0 = 1 + 2   - binary complement rule (unadjusted only;
+#                                     EA estimates are not expected to be
+#                                     additive per GBI 2026-05 spec)
+#   (2) sex:           0 = 1 + 2   - binary complement rule
+#   (3) age_grp:       0 = sum(1:12)
 
-write_csv(final_output, "GBI_DataTemplate_NNPAS_2011-12.csv")
-cat("\nCSV exported to: GBI_DataTemplate_NNPAS_2011-12.csv\n")
+final_output <- final_output %>%
+  mutate(suppress_primary = !is.na(n) & n < MIN_CELL_N)
+
+# Bread-subtype additivity (unadjusted only)
+final_output <- final_output %>%
+  group_by(bread_def, energy_adj, sex, residence, edu_level, age_grp) %>%
+  mutate(
+    .n_prim_st = if_else(energy_adj == 1L,
+                         sum(suppress_primary & bread_subtype %in% c(1L, 2L)),
+                         0L)
+  ) %>%
+  ungroup() %>%
+  mutate(suppress_sec_subtype =
+           .n_prim_st == 1L & bread_subtype %in% c(1L, 2L) & !suppress_primary) %>%
+  select(-.n_prim_st)
+
+# Sex additivity (0 = 1 + 2)
+final_output <- final_output %>%
+  group_by(bread_def, bread_subtype, energy_adj, residence, edu_level, age_grp) %>%
+  mutate(
+    .n_prim_sx = sum(suppress_primary & sex %in% c(1L, 2L))
+  ) %>%
+  ungroup() %>%
+  mutate(suppress_sec_sex =
+           .n_prim_sx == 1L & sex %in% c(1L, 2L) & !suppress_primary) %>%
+  select(-.n_prim_sx)
+
+# Age-group additivity (0 = sum(1:12)); only relevant where age_grp = 0 exists
+final_output <- final_output %>%
+  group_by(bread_def, bread_subtype, energy_adj, sex, residence, edu_level) %>%
+  mutate(
+    .has_age_total = any(age_grp == 0L),
+    .n_prim_ag     = if_else(.has_age_total,
+                             sum(suppress_primary & age_grp != 0L),
+                             0L)
+  ) %>%
+  ungroup()
+
+age_sec_targets <- final_output %>%
+  filter(.n_prim_ag == 1L, age_grp != 0L, !suppress_primary) %>%
+  group_by(bread_def, bread_subtype, energy_adj, sex, residence, edu_level) %>%
+  slice_min(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(bread_def, bread_subtype, energy_adj, sex, residence, edu_level, age_grp) %>%
+  mutate(.sec_age = TRUE)
+
+final_output <- final_output %>%
+  left_join(age_sec_targets,
+            by = c("bread_def","bread_subtype","energy_adj",
+                   "sex","residence","edu_level","age_grp")) %>%
+  mutate(suppress_sec_age = replace_na(.sec_age, FALSE)) %>%
+  select(-.has_age_total, -.n_prim_ag, -.sec_age)
+
+final_output <- final_output %>%
+  mutate(
+    suppress = case_when(
+      suppress_primary                                             ~ "P",
+      suppress_sec_subtype | suppress_sec_sex | suppress_sec_age  ~ "S",
+      TRUE                                                         ~ ""
+    )
+  ) %>%
+  select(-suppress_primary, -suppress_sec_subtype,
+         -suppress_sec_sex, -suppress_sec_age)
+
+cat("\nCell suppression summary (MIN_CELL_N =", MIN_CELL_N, "):\n")
+final_output %>% count(suppress) %>% print()
 
 # =============================================================================
-# SECTION 12: Fill GBI Excel template
+# SECTION 12: Export CSV
 # =============================================================================
-# Reads the original GBI_Aggregate_Data_Form.xlsx template and produces a
-# filled copy with Survey_Info_Template, Codebook, and Data_Template populated.
-# Requires: install.packages("openxlsx")
+write_csv(final_output, output_csv)
+cat("\nCSV exported to:", output_csv, "\n")
 
-library(openxlsx)
-
-template_path <- "GBI_Aggregate_Data_Form.xlsx"
-output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2011-12.xlsx"
-
+# =============================================================================
+# SECTION 13: Fill GBI Excel template
+# =============================================================================
 cat("\n--- Filling GBI Excel template ---\n")
 
 wb <- loadWorkbook(template_path)
 
-# --- 12a. Survey_Info_Template ------------------------------------------------
-# The template has field labels in column B and entry cells in column C.
-# Row layout (from template inspection):
-#   Row 3: Survey name
-#   Row 4: Country
-#   Row 5: Survey year(s)
-#   Row 6: Geographic coverage
-#   Row 7: Target population
-#   Row 8: Sample size
-#   Row 9: Dietary assessment method
-#   Row 10: Number of recall/record days
-#   Row 11: Sampling design
-#   Row 12: Survey weights available?
-#   Row 13: Replicate weights available?
-#   Row 14: Data source / reference
-#   Row 15: Food composition database used
-#   Row 16: Bread classification method
-#   Row 17: Mixed dish disaggregation method
-#   Row 18: Energy adjustment method
-#   Row 19: Additional notes
+# --- 12a. Survey_Info_Template ----------------------------------------------
+n_total   <- nrow(persons)
+n_two_day <- sum(persons$has_d1 & persons$has_d2)
+sample_text <- sprintf("%s persons (%s with 2-day recall)",
+                       format(n_total, big.mark = ","),
+                       format(n_two_day, big.mark = ","))
 
 survey_info <- list(
-  c(3, "National Nutrition and Physical Activity Survey (NNPAS)"),
-  c(4, "Australia"),
-  c(5, "2011-2012"),
-  c(6, "National (all states and territories, urban and rural)"),
-  c(7, "Persons aged 2 years and over, usual residents of private dwellings"),
-  c(8, "12,153 persons (7,735 with 2-day recall)"),
-  c(9, "24-hour dietary recall (interviewer-administered, AMPM method)"),
-  c(10, "2 days for most respondents (Day 1 face-to-face, Day 2 telephone); Day 1 used for point estimates"),
-  c(11, "Multi-stage area probability sample of private dwellings; stratified by state/territory and capital city/rest of state"),
-  c(12, "Yes — NPAFINWT (Day 1 person weight)"),
-  c(13, "Yes — 60 jackknife replicate weights (WPM0101–WPM0160)"),
-  c(14, "ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey, Nutrition and Physical Activity, 2011-12, Basic CURF"),
-  c(15, "AUSNUT 2011-13 (ABS/FSANZ); ADG Database used for mixed dish disaggregation"),
-  c(16, paste("Bread alone: all AUSNUT 2011-13 food codes 12201001–12307004",
-              "(standalone bread products including regular breads, rolls, flatbreads,",
-              "English muffins, sweet buns, garlic bread).",
-              "Wholegrain/refined classification based on ADG Database columns 1011/1021,",
-              "with keyword matching for items not classified by ADG.")),
-  c(17, paste("ADG Database provides g/100g of wholegrain bread (col 1011) and",
-              "refined bread (col 1021) for all foods.",
-              "Bread content of mixed dishes calculated as GRAMWGT × (ADG value / 100).")),
-  c(18, paste("Residual method: regress bread intake (log-transformed if non-normal)",
-              "on total energy intake (kcal/day); add predicted value at 2000 kcal",
-              "to residuals; exponentiate if log-transformed.",
-              "Energy adjustment performed on full sample, not per-stratum.")),
-  c(19, paste("Urban = Major cities + Inner regional (ARIABC 1-2); Rural = Other remote areas (ARIABC 3).",
-              "Education for children <15 assigned from the highest-educated adult in the household.",
-              "SD corrected for within-person variation using ANOVA on 2-day subsample",
-              "(between-person variance ratio applied to Day 1 weighted SD).",
+  c(3,  "National Nutrition and Physical Activity Survey (NNPAS)"),
+  c(4,  "Australia"),
+  c(5,  "2011-2012"),
+  c(6,  "National (all states and territories, urban and rural)"),
+  c(7,  "Persons aged 2 years and over, usual residents of private dwellings"),
+  c(8,  sample_text),
+  c(9,  "24-hour dietary recall (interviewer-administered, AMPM method)"),
+  c(10, paste("2 days for most respondents (Day 1 face-to-face,",
+              "Day 2 telephone); person-level mean intakes averaged",
+              "across all valid recall days.")),
+  c(11, paste("Multi-stage area probability sample of private dwellings;",
+              "stratified by state/territory and capital city/rest of state")),
+  c(12, "Yes -- NPAFINWT (Day-1 person weight)"),
+  c(13, "Yes -- 60 jackknife replicate weights (WPM0101-WPM0160)"),
+  c(14, paste("ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey,",
+              "Nutrition and Physical Activity, 2011-12, Basic CURF",
+              "(with measured height/weight imputed for missing values)")),
+  c(15, "AUSNUT 2011-13 (ABS/FSANZ); ADG Database used for mixed-dish disaggregation"),
+  c(16, paste("Bread alone: explicit AUSNUT 2011-13 code list per GBI",
+              "2026-05 specification clarification",
+              "(12201001-12203017, 12203022-12305006, 12307001-12307004,",
+              "13201001, 13201002, 13201010, 13201012,",
+              "13203001, 13203002, 13205003).",
+              "Wholegrain vs refined classified by ADG columns",
+              "1011/1015/1017 vs 1021/1025/1027 majority,",
+              "with keyword fallback (wholemeal/wholegrain/multigrain/",
+              "mixed grain/rye/spelt/pumpernickel/added fibre/high fibre/",
+              "chapatti/injera/roti) and refined default.")),
+  c(17, paste("Bread all sources: bread-alone codes plus mixed-dish codes",
+              "13503001-13507004, 13507014-13507036, 13508012.",
+              "Bread g extracted from each food via ADG g/100g lookup,",
+              "using columns 1011 + 1015 + 1017 (wholegrain) and",
+              "1021 + 1025 + 1027 (refined) summed over each food record.")),
+  c(18, paste("Residual method on the log scale (per GBI 2026-04 note):",
+              "fit log(bread) ~ log(energy_kcal) once per bread outcome",
+              "across all consumers (unweighted; pooled across strata);",
+              "compute log(bread)_adj = log(bread) - beta*(log(energy)",
+              "- log(2000)); exponentiate. Non-consumers assigned 0 g/day.",
+              "Implausible energy reporters (and persons with missing",
+              "energy or BMR) excluded from EA estimates only;",
+              "they remain in the unadjusted estimates.")),
+  c(19, paste("Energy plausibility: Schofield (1985) weight-based BMR;",
+              "flag EI:BMR < 0.9 or > 2.4 (Goldberg cutoffs).",
+              "Pregnant women and children <10y exempt and always retained.",
+              "Measured height and weight are imputed (hot-deck by ABS-style",
+              "approach) so BMR is calculable for almost all records.",
+              "Urban = ARIABC 1-2; Rural = ARIABC 3.",
+              "Education for children <15 assigned from highest-educated",
+              "adult in the household.",
+              "Person-level mean intake = mean across all valid recall days",
+              "(0-intake days retained as true zeros).",
+              "SD reported = weighted empirical SD of person-level means",
+              "within stratum (no ANOVA partitioning).",
               "SE estimated via jackknife replication (60 replicate weights)."))
 )
 
-# Write to column C (col 3), starting at the rows indicated
 ws_info <- "Survey_Info_Template"
 for (item in survey_info) {
-  row_num <- as.integer(item[[1]])
-  value   <- item[[2]]
-  writeData(wb, sheet = ws_info, x = value, startCol = 3, startRow = row_num,
+  writeData(wb, sheet = ws_info, x = item[[2]],
+            startCol = 3, startRow = as.integer(item[[1]]),
             colNames = FALSE)
 }
-
 cat("  Survey_Info_Template filled\n")
 
 # --- 12b. Codebook -----------------------------------------------------------
-# Column A (col 1) contains "Availability in your dataset (Yes/No)"
-# Rows 3-19 correspond to each variable (survey_name through notes)
-# All variables are available in our data except we document specifics
+codebook_availability <- rep("Yes", 17)
 
-codebook_availability <- c(
-  "Yes",  # survey_name (row 3)
-  "Yes",  # year_start (row 4)
-  "Yes",  # year_end (row 5)
-  "Yes",  # bread_def (row 6)
-  "Yes",  # bread_subtype (row 7)
-  "Yes",  # energy_adj (row 8)
-  "Yes",  # sex (row 9)
-  "Yes",  # residence (row 10)
-  "Yes",  # edu_level (row 11)
-  "Yes",  # age_grp (row 12)
-  "Yes",  # n (row 13)
-  "Yes",  # mean_g (row 14)
-  "Yes",  # sd_g (row 15)
-  "Yes",  # se_g (row 16)
-  "Yes",  # pct_non_consumers (row 17)
-  "Yes",  # mean_kcal (row 18)
-  "Yes"   # notes (row 19)
-)
-
-# Variable-specific comments (column J, col 10)
 codebook_comments <- c(
-  NA,  # survey_name
-  NA,  # year_start
-  NA,  # year_end
-  "Both bread alone (1) and bread all sources (2) provided.",  # bread_def
-  "Wholegrain/refined classification based on ADG Database columns 1011/1021, with keyword matching for unclassified items.",  # bread_subtype
-  "Both non-energy-adjusted (1) and energy-adjusted (2) estimates provided. Energy adjustment uses the residual method standardised to 2000 kcal.",  # energy_adj
-  NA,  # sex
-  "Urban = ARIABC 1 (Major cities) + ARIABC 2 (Inner regional). Rural = ARIABC 3 (Other/remote). This differs from a strict urban/rural split.",  # residence
-  paste("Mapped from NNPAS: Tertiary = LVHNSQBC 1-4 (postgrad, bachelor, diploma, cert III/IV);",
-        "Secondary = Year 10-12 (HYSCHCBC 1-3) without tertiary qual;",
-        "Primary = Year 9 or below (HYSCHCBC 4-5) without tertiary qual.",
-        "Children <15: highest-educated adult in household."),  # edu_level
-  "NNPAS age range is 2-85+. Mapped to GBI bands. Age 85 coded as 85+ (GBI band 12: 85-100).",  # age_grp
-  NA,  # n
-  "Weighted mean using NPAFINWT (Day 1 person weight). Day 1 recall only.",  # mean_g
-  "Weighted SD, corrected for within-person variation using ANOVA on 2-day subsample. Between-person variance ratio applied to deflate Day 1 SD.",  # sd_g
-  "Design-based SE from jackknife replication using 60 replicate weights (WPM0101-WPM0160).",  # se_g
-  "Weighted proportion of persons with zero intake on Day 1.",  # pct_non_consumers
-  "Weighted mean total energy intake (Day 1), converted from kJ to kcal (÷ 4.184).",  # mean_kcal
-  NA   # notes
+  NA, NA, NA,
+  "Both bread alone (1) and bread all sources (2) provided per GBI 2026-05 code lists.",
+  paste("Wholegrain/refined classification based on ADG Database columns",
+        "1011+1015+1017 (WG) vs 1021+1025+1027 (Refined),",
+        "with keyword fallback and refined default."),
+  paste("Both unadjusted (1) and energy-adjusted (2) estimates provided.",
+        "Energy adjustment is the residual method (log-log) standardised",
+        "to 2,000 kcal/day, fitted unweighted on consumers only."),
+  NA,
+  "Urban = ARIABC 1 (Major cities) + 2 (Inner regional). Rural = ARIABC 3.",
+  paste("Mapped from NNPAS: Tertiary = LVHNSQBC 1-4; Secondary = HYSCHCBC 1-3;",
+        "Primary = HYSCHCBC 4-5. Children <15: highest-educated adult in household."),
+  "NNPAS age range is 2-85+. Mapped to GBI bands; band 12 = 85+.",
+  NA,
+  paste("Weighted mean using NPAFINWT, of person-level mean intake",
+        "(averaged across all valid recall days; 0-intake days retained)."),
+  paste("Weighted empirical SD of person-level mean intakes within stratum.",
+        "No ANOVA partitioning of within/between-person variance is applied."),
+  "Design-based SE from jackknife replication using 60 replicate weights (WPM0101-WPM0160).",
+  paste("Weighted proportion of persons whose person-level mean intake = 0 g/day",
+        "(i.e., bread intake = 0 g on every valid recall day)."),
+  paste("Weighted mean person-level mean total energy intake (kcal/day),",
+        "across same valid recall days as bread; among persons with valid energy.",
+        "An additional sd_kcal column is exported alongside in the CSV."),
+  NA
 )
 
 for (i in seq_along(codebook_availability)) {
-  row_num <- i + 2  # data starts at row 3
-  writeData(wb, sheet = "Codebook", x = codebook_availability[i],
-            startCol = 1, startRow = row_num, colNames = FALSE)
+  writeData(wb, sheet = "Codebook",
+            x = codebook_availability[i],
+            startCol = 1, startRow = i + 2, colNames = FALSE)
   if (!is.na(codebook_comments[i])) {
-    writeData(wb, sheet = "Codebook", x = codebook_comments[i],
-              startCol = 10, startRow = row_num, colNames = FALSE)
+    writeData(wb, sheet = "Codebook",
+              x = codebook_comments[i],
+              startCol = 10, startRow = i + 2, colNames = FALSE)
   }
 }
-
 cat("  Codebook filled\n")
 
-# --- 12c. Data_Template -------------------------------------------------------
-# Clear example data rows (rows 4-35) and write our estimates
-# Header row is row 3 with variable names
-# We write starting at row 4
-
-# Remove example data (rows 4 onwards)
-# openxlsx doesn't have a clean "delete rows" so we overwrite
+# --- 12c. Data_Template ------------------------------------------------------
+# The template expects the original 17 columns (no sd_kcal). Provide them,
+# and keep sd_kcal in the CSV for the contributor documentation note.
 data_for_template <- final_output %>%
   select(survey_name, year_start, year_end,
          bread_def, bread_subtype, energy_adj,
@@ -921,12 +971,9 @@ data_for_template <- final_output %>%
 
 writeData(wb, sheet = "Data_Template", x = data_for_template,
           startCol = 1, startRow = 4, colNames = FALSE)
-
 cat("  Data_Template filled with", nrow(data_for_template), "rows\n")
 
-# --- Save filled workbook ----------------------------------------------------
 saveWorkbook(wb, output_xlsx, overwrite = TRUE)
 cat("\nFilled Excel template saved to:", output_xlsx, "\n")
 
 cat("\n=== ALL DONE ===\n")
-

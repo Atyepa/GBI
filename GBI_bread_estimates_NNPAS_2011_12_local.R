@@ -1,175 +1,141 @@
 # =============================================================================
-# GBI Aggregate Bread Intake Estimates -- NNPAS 2023
+# GBI Aggregate Bread Intake Estimates -- NNPAS 2011-12  (LOCAL TESTING COPY)
 # =============================================================================
-# Produces population-level bread intake estimates from the ABS 2023
-# National Nutrition and Physical Activity Survey (NNPAS), formatted for
-# the Global Bread Intake (GBI) Study aggregate data request.
+# Local version of GBI_bread_estimates_NNPAS_2011_12.R.
+# Identical analytical logic to the production script; only the data and
+# output paths differ so this can be run locally outside the ABS DataLab.
+# Keep changes here mirrored against the production script.
 #
 # Updated 2026-05 to follow the GBI methodological clarification note
-# ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026):
-#   - Person-level mean intakes are computed across all valid recall days
-#     (Day 1 and, where available, Day 2), with zero-intake days retained.
-#   - Energy-adjusted intake (residual method, log-log, standardized to
-#     2,000 kcal/day) is the preferred output, alongside unadjusted intake.
-#   - Energy-plausibility screening uses Schofield BMR + Goldberg cutoffs
-#     (EI:BMR < 0.9 or > 2.4). Children <10y and pregnant women are exempt
-#     from this filter and are always retained.
-#   - SDs are now the weighted empirical SD of person-level mean intakes
-#     within each stratum (no ANOVA partitioning).
-#   - Bread alone uses an explicit AUSNUT 2023 code list (per 2026-05 spec).
-#   - Bread all sources is computed by summing food-record-level wholegrain
-#     and refined bread g across three "ADG-category" pairs:
-#       wholegrain  = WGBRGM + WGSVGM + WGMFGM
-#       refined     = RFBRGM + RFSVGM + RFMFGM
-#     restricted to food records whose FOODCODL is in the all-bread list.
+# ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026). See
+# the production script header for the full change list.
 # =============================================================================
 
 library(tidyverse)
 library(readxl)
-library(haven)
 library(survey)
 library(srvyr)
 library(openxlsx)
 
 # --- Paths ----------------------------------------------------------------
-nnpas_dir   <- "NNPAS_2023"
-ausnut_path <- file.path(nnpas_dir, "AUSNUT_2023.xlsx")
-hhd_path    <- file.path(nnpas_dir, "nnpas23hhd.sas7bdat")
-sps_path    <- file.path(nnpas_dir, "nnpas23sps.sas7bdat")
-food_path   <- file.path(nnpas_dir, "nnpas23food.sas7bdat")
+curf_dir  <- "C:\\Users\\atyeo\\OneDrive\\R data\\NNPAS_2011_12\\CURF"
+GBI_path  <- "C:\\Users\\atyeo\\OneDrive\\R data\\GBI"
 
-template_path <- "GBI_Aggregate_Data_Form_unprotected.xlsx"
-output_csv    <- "GBI_DataTemplate_NNPAS_2023.csv"
-output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2023.xlsx"
+template_path <- file.path(GBI_path, "GBI_Aggregate_Data_Form_unprotected.xlsx")
+output_csv    <- file.path(GBI_path, "GBI_DataTemplate_NNPAS_2011-12.csv")
+output_xlsx   <- file.path(GBI_path, "GBI_AggregateDataForm_NNPAS_2011-12.xlsx")
 
 # --- Disclosure-control "rule of n" --------------------------------------
 # Minimum cell size below which a stratum is primary-suppressed.
-# 3 is a common general rule; ABS DataLab egress requires 10. Change here
+# 3 is a common general rule; ABS DataLab egress requires 10, but 1 for BC. Change here
 # (e.g., MIN_CELL_N <- 10) when preparing data for DataLab clearance.
-MIN_CELL_N <- 3
+MIN_CELL_N <- 1
 
 # =============================================================================
-# SECTION 1: AUSNUT 2023 food-code lists and bread-alone classification
+# SECTION 1: AUSNUT food-code lists and ADG reference data
 # =============================================================================
 
-# --- 1a. AUSNUT 2023 code lists (per 2026-05 GBI spec clarification) --------
-bread_alone_codes_2023 <- c(
-  12201001:12305002, 12305004:12305007, 12306001:12306004,
-  13201001:13201002, 13201018:13201019,
-  13202001, 13204003
+# --- 1a. AUSNUT 2011-13 code lists (per 2026-05 GBI spec clarification) -----
+bread_alone_codes_2011_12 <- c(
+  12201001:12203017, 12203022:12305006, 12307001:12307004,
+  13201001, 13201002, 13201010, 13201012,
+  13203001, 13203002, 13205003
 )
 
-all_bread_codes_2023 <- c(
-  bread_alone_codes_2023,
-  13503001:13504001, 13504004:13507004,
-  13507008:13507012, 13507016:13507019
+all_bread_codes_2011_12 <- c(
+  bread_alone_codes_2011_12,
+  13503001:13507004, 13507014:13507036, 13508012
 )
 
-# --- 1b. Bread-alone wholegrain/refined classification ----------------------
-# Layered classification:
-#   Rule A: description keyword match -> wholegrain.
-#   Rule B: AUSNUT 2023 WGBRGM vs RFBRGM majority.
-#   Rule C: FIBRE > 5 g/100 g -> wholegrain.
-#   Default: refined.
-ausnut <- read_excel(ausnut_path, sheet = 1)
+# --- 1b. ADG Database (food composition / disaggregation) -------------------
+adg <- read_excel(file.path(curf_dir, "ADG_Database.xlsx"))
 
-bread_alone_codes <- ausnut %>%
-  filter(FOODCODL %in% bread_alone_codes_2023) %>%
-  select(FOODCODL, Food_name, FIBRE, WGBRGM, RFBRGM)
+adg <- adg %>% filter(Unit == "g/100g")
 
+cat("ADG filtered to g/100g:", nrow(adg), "rows,",
+    n_distinct(adg$FOODCODC), "unique FOODCODCs\n")
+
+adg <- adg %>%
+  rename(
+    adg_wg_br  = `1011`,
+    adg_wg_sv  = `1015`,
+    adg_wg_mf  = `1017`,
+    adg_ref_br = `1021`,
+    adg_ref_sv = `1025`,
+    adg_ref_mf = `1027`
+  ) %>%
+  mutate(
+    across(c(adg_wg_br, adg_wg_sv, adg_wg_mf,
+             adg_ref_br, adg_ref_sv, adg_ref_mf),
+           ~ replace_na(as.numeric(.x), 0)),
+    adg_wg_total  = adg_wg_br  + adg_wg_sv  + adg_wg_mf,
+    adg_ref_total = adg_ref_br + adg_ref_sv + adg_ref_mf
+  )
+
+# --- 1c. Bread-alone wholegrain/refined classification ----------------------
 wg_keywords <- c("wholemeal", "wholegrain", "whole grain", "mixed grain",
                  "multigrain", "multi-grain", "\\brye\\b", "spelt",
                  "pumpernickel", "added fibre", "high fibre",
                  "chapatti", "injera", "roti")
 
-bread_alone_codes <- bread_alone_codes %>%
+bread_alone_classify <- adg %>%
+  filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
+  select(FOODCODC, Description, adg_wg_total, adg_ref_total) %>%
   mutate(
-    desc_lower = str_to_lower(Food_name),
+    desc_lower = str_to_lower(Description),
     desc_wg    = str_detect(desc_lower, str_c(wg_keywords, collapse = "|")),
     bread_class = case_when(
-      desc_wg                                    ~ "wholegrain",
-      WGBRGM > RFBRGM                            ~ "wholegrain",
-      RFBRGM > WGBRGM                            ~ "refined",
-      FIBRE > 5                                  ~ "wholegrain",
-      TRUE                                       ~ "refined"
+      adg_wg_total  > adg_ref_total  ~ "wholegrain",
+      adg_ref_total > adg_wg_total   ~ "refined",
+      desc_wg                        ~ "wholegrain",
+      TRUE                           ~ "refined"
     )
   ) %>%
-  select(FOODCODL, Food_name, FIBRE, WGBRGM, RFBRGM, bread_class)
+  select(FOODCODC, Description, bread_class)
 
-cat("Standalone bread codes in AUSNUT 2023 list:", nrow(bread_alone_codes), "\n")
-cat("Classification breakdown:\n")
-count(bread_alone_codes, bread_class) %>% print()
+cat("Bread alone codes (", length(bread_alone_codes_2011_12), "in list):",
+    nrow(bread_alone_classify), "classified\n")
+count(bread_alone_classify, bread_class) %>% print()
 
-write_csv(bread_alone_codes, "bread_alone_classification_NNPAS_2023.csv")
+write_csv(bread_alone_classify,
+          file.path(GBI_path, "bread_alone_classification_NNPAS_2011_12.csv"))
+
+# --- 1d. ADG bread content lookup for "bread all sources" -------------------
+adg_bread_content <- adg %>%
+  filter(adg_wg_total > 0 | adg_ref_total > 0) %>%
+  select(FOODCODC, adg_wg_total, adg_ref_total)
+
+cat("\nFoods with any bread content in ADG:", nrow(adg_bread_content), "\n")
 
 # =============================================================================
-# SECTION 2: Load NNPAS 2023 unit-record files
+# SECTION 2: Load CURF data files
 # =============================================================================
 
-# --- 2a. Household file -----------------------------------------------------
-hhd <- read_sas(hhd_path) %>%
-  select(ABSHIDD, ARIA21SL)
+# --- 2a. Person file --------------------------------------------------------
+persons <- read_csv(file.path(curf_dir, "npa11bp.csv"),
+                    show_col_types = FALSE)
 
-cat("\nHouseholds loaded:", nrow(hhd), "\n")
-
-# --- 2b. Selected person file -----------------------------------------------
-# Includes:
-#   identifiers, weights, replicate weights,
-#   age (AGE99), sex (SEXBIRTH), education (HIGHLVLD),
-#   Day-1 / Day-2 energy (ENERGYF1, ENERGYF2),
-#   Day-2 food count (COUNTFD2),
-#   measured height (cm) and weight (kg) from the imputed CURF,
-#   pregnancy flag.
-#
-# Column-name notes (verify against your 2023 DIL):
-#   PHDCMHBC / PHDKGWBC -- measured height (cm) and weight (kg),
-#                          imputed values overwrite 997/998 codes.
-#   PREGNANT             -- pregnancy flag (1 = pregnant). If the 2023
-#                          DIL uses a different code (e.g. PREGCOND),
-#                          rename to PREGNANT below.
-sps <- read_sas(sps_path) %>%
-  rename(ABSPID = ABSPIDD)
-
-rep_wt_cols <- grep("^WPM01[0-9]{2}$", names(sps), value = TRUE)
-if (length(rep_wt_cols) != 60) {
-  warning("Expected 60 replicate weight columns matching ^WPM01[0-9]{2}$, ",
-          "found ", length(rep_wt_cols), ". Check column naming.")
-}
-
-persons <- sps %>%
+persons <- persons %>%
   select(
-    ABSHIDD, ABSPID,
-    AGE99, SEXBIRTH,
-    HIGHLVLD,
-    # ABS NNPAS 2023 already provides BMR (Schofield-style, computed on
-    # the imputed measured weight/height) and EIBMR1/EIBMR2 (energy-
-    # intake-to-BMR ratio per recall day). We use these directly --
-    # no need to recompute BMR ourselves.
-    any_of(c("BMR", "EIBMR1", "EIBMR2")),
-    NPAFINWT,
-    all_of(rep_wt_cols),
-    ENERGYF1, ENERGYF2,
-    COUNTFD2
-  ) %>%
-  left_join(hhd, by = "ABSHIDD") %>%
-  mutate(person_uid = paste(ABSHIDD, ABSPID, sep = "_"))
+    ABSHID, ABSPID,
+    AGE, SEX,
+    any_of(c("PHDCMHBC", "PHDKGWBC", "PREGNANT")),
+    NPAFINWT, NPAD2WGT, NUMRECAL,
+    ARIABC, HYSCHCBC, LVHNSQBC,
+    ENERGYT1, ENERGYT2,
+    starts_with("WPM01")
+  )
 
-if (!"BMR"    %in% names(persons)) persons$BMR    <- NA_real_
-if (!"EIBMR1" %in% names(persons)) persons$EIBMR1 <- NA_real_
-if (!"EIBMR2" %in% names(persons)) persons$EIBMR2 <- NA_real_
+if (!"PHDCMHBC" %in% names(persons)) persons$PHDCMHBC <- NA_real_
+if (!"PHDKGWBC" %in% names(persons)) persons$PHDKGWBC <- NA_real_
+if (!"PREGNANT" %in% names(persons)) persons$PREGNANT <- NA_integer_
 
-cat("Persons loaded:", nrow(persons), "\n")
+cat("\nPersons loaded:", nrow(persons), "\n")
 
-# --- 2c. Food file ----------------------------------------------------------
-# Bring in the six WG*GM/RF*GM columns used for "bread all sources":
-#   WGBRGM, WGSVGM, WGMFGM  -- wholegrain bread (g) by ADG category
-#   RFBRGM, RFSVGM, RFMFGM  -- refined bread (g) by ADG category
-foods <- read_sas(food_path) %>%
-  rename(ABSPID = ABSPIDD) %>%
-  select(ABSHIDD, ABSPID, DAYNUM, FOODCODL, GRAMWGT,
-         WGBRGM, WGSVGM, WGMFGM,
-         RFBRGM, RFSVGM, RFMFGM) %>%
-  mutate(person_uid = paste(ABSHIDD, ABSPID, sep = "_"))
+# --- 2b. Food file ----------------------------------------------------------
+foods <- read_csv(file.path(curf_dir, "npa11bf.csv"),
+                  show_col_types = FALSE) %>%
+  select(ABSPID, DAYNUM, FOODCODC, GRAMWGT)
 
 cat("Food records loaded:", nrow(foods), "\n")
 cat("  Day 1 records:", sum(foods$DAYNUM == 1), "\n")
@@ -179,62 +145,43 @@ cat("  Day 2 records:", sum(foods$DAYNUM == 2), "\n")
 # SECTION 3: Stratification and person-level prep
 # =============================================================================
 
-# --- 3a. Exclude any participants aged <2 years (GBI age eligibility) -------
-n_under2 <- sum(persons$AGE99 < 2, na.rm = TRUE)
+n_under2 <- sum(persons$AGE < 2, na.rm = TRUE)
 if (n_under2 > 0) {
   cat("\nExcluding", n_under2, "participants aged <2 years (GBI eligibility).\n")
-  persons <- persons %>% filter(AGE99 >= 2)
+  persons <- persons %>% filter(AGE >= 2)
 }
 
-# --- 3b. Age groups (GBI bands 1-12) ----------------------------------------
 age_breaks <- c(2, 6, 11, 15, 20, 25, 35, 45, 55, 65, 75, 85, Inf)
 age_labels <- 1:12
 
 persons <- persons %>%
   mutate(
-    age_grp = cut(AGE99, breaks = age_breaks, labels = age_labels,
+    age_grp = cut(AGE, breaks = age_breaks, labels = age_labels,
                   right = FALSE, include.lowest = TRUE) %>% as.integer()
   )
 
 cat("\nAge group distribution:\n")
 persons %>% count(age_grp) %>% print()
 
-# --- 3c. Sex (SEXBIRTH) -----------------------------------------------------
-persons <- persons %>%
-  mutate(sex = as.integer(SEXBIRTH))
-
-# --- 3d. Education ----------------------------------------------------------
-tertiary_codes  <- c("100","110","111","114","120",
-                     "200","211","212","213","221","222",
-                     "310",
-                     "411","413","421",
-                     "510","511","514")
-secondary_codes <- c("520","521","524",
-                     "611","610","613","621")
-primary_codes   <- c("000","600","622","623")
-
 persons <- persons %>%
   mutate(
-    HIGHLVLD_chr = sprintf("%s", HIGHLVLD),
     edu_level_own = case_when(
-      AGE99 < 15                                  ~ NA_integer_,
-      HIGHLVLD_chr %in% tertiary_codes            ~ 3L,
-      HIGHLVLD_chr %in% secondary_codes           ~ 2L,
-      HIGHLVLD_chr %in% primary_codes             ~ 1L,
-      HIGHLVLD_chr %in% c("500","011")            ~ 2L,
-      HIGHLVLD_chr %in% c("999")                  ~ NA_integer_,
-      TRUE                                        ~ 2L
+      AGE < 15            ~ NA_integer_,
+      LVHNSQBC %in% 1:4   ~ 3L,
+      HYSCHCBC %in% 1:3   ~ 2L,
+      HYSCHCBC %in% 4:5   ~ 1L,
+      TRUE                ~ 2L
     )
   )
 
 adult_edu <- persons %>%
-  filter(AGE99 >= 15, !is.na(edu_level_own)) %>%
-  group_by(ABSHIDD) %>%
+  filter(AGE >= 15, !is.na(edu_level_own)) %>%
+  group_by(ABSHID) %>%
   summarise(hh_adult_edu = max(edu_level_own), .groups = "drop")
 
 persons <- persons %>%
-  left_join(adult_edu, by = "ABSHIDD") %>%
-  mutate(edu_level = if_else(AGE99 < 15, hh_adult_edu, edu_level_own))
+  left_join(adult_edu, by = "ABSHID") %>%
+  mutate(edu_level = if_else(AGE < 15, hh_adult_edu, edu_level_own))
 
 n_edu_na <- sum(is.na(persons$edu_level))
 if (n_edu_na > 0) {
@@ -245,32 +192,21 @@ if (n_edu_na > 0) {
 cat("\nEducation level distribution:\n")
 persons %>% count(edu_level) %>% print()
 
-# --- 3e. Residence (ARIA21SL) -----------------------------------------------
 persons <- persons %>%
-  mutate(
-    ARIA21SL_n = as.integer(ARIA21SL),
-    residence = case_when(
-      ARIA21SL_n %in% c(0, 1)        ~ 1L,
-      ARIA21SL_n %in% c(2, 3, 4)     ~ 2L,
-      TRUE                           ~ NA_integer_
-    )
-  )
+  mutate(residence = if_else(ARIABC %in% c(1, 2), 1L, 2L))
 
 cat("\nResidence distribution:\n")
 persons %>% count(residence) %>% print()
 
+persons <- persons %>% mutate(sex = as.integer(SEX))
+
 # =============================================================================
 # SECTION 4: Person-level bread intake (mean across all valid recall days)
 # =============================================================================
-# Per GBI 2026-05 spec:
-#   - Each valid recall day contributes to the person-level mean.
-#   - Days with zero bread intake are retained as true zero-intake days.
-#   - The same set of valid days must be used for bread and for energy.
 
-# --- 4a. Valid recall days per person ---------------------------------------
 person_recall_days <- foods %>%
-  distinct(person_uid, DAYNUM) %>%
-  group_by(person_uid) %>%
+  distinct(ABSPID, DAYNUM) %>%
+  group_by(ABSPID) %>%
   summarise(
     has_d1 = any(DAYNUM == 1),
     has_d2 = any(DAYNUM == 2),
@@ -279,7 +215,7 @@ person_recall_days <- foods %>%
   )
 
 persons <- persons %>%
-  left_join(person_recall_days, by = "person_uid") %>%
+  left_join(person_recall_days, by = "ABSPID") %>%
   mutate(
     has_d1 = coalesce(has_d1, FALSE),
     has_d2 = coalesce(has_d2, FALSE),
@@ -289,53 +225,49 @@ persons <- persons %>%
 cat("\nRecall-day coverage:\n")
 persons %>% count(has_d1, has_d2) %>% print()
 
-recall_days_long <- foods %>% distinct(person_uid, DAYNUM)
+recall_days_long <- foods %>% distinct(ABSPID, DAYNUM)
 
-# --- 4b. Bread alone per (person, day) --------------------------------------
 bread_alone_pd <- recall_days_long %>%
   left_join(
     foods %>%
-      filter(FOODCODL %in% bread_alone_codes_2023) %>%
-      inner_join(bread_alone_codes %>% select(FOODCODL, bread_class),
-                 by = "FOODCODL") %>%
-      group_by(person_uid, DAYNUM) %>%
+      filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
+      inner_join(bread_alone_classify %>% select(FOODCODC, bread_class),
+                 by = "FOODCODC") %>%
+      group_by(ABSPID, DAYNUM) %>%
       summarise(
         ba_total_g_d = sum(GRAMWGT, na.rm = TRUE),
         ba_wg_g_d    = sum(GRAMWGT[bread_class == "wholegrain"], na.rm = TRUE),
         ba_ref_g_d   = sum(GRAMWGT[bread_class == "refined"],    na.rm = TRUE),
         .groups = "drop"
       ),
-    by = c("person_uid", "DAYNUM")
+    by = c("ABSPID", "DAYNUM")
   ) %>%
   mutate(across(c(ba_total_g_d, ba_wg_g_d, ba_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-# --- 4c. Bread all sources per (person, day) --------------------------------
-# Filter to all-bread food codes, then sum the three WG / three RF columns
-# (already in g per food record from AUSNUT 2023).
 bread_allsrc_pd <- recall_days_long %>%
   left_join(
     foods %>%
-      filter(FOODCODL %in% all_bread_codes_2023) %>%
+      filter(FOODCODC %in% all_bread_codes_2011_12) %>%
+      inner_join(adg_bread_content, by = "FOODCODC") %>%
       mutate(
-        wg_g  = coalesce(WGBRGM, 0) + coalesce(WGSVGM, 0) + coalesce(WGMFGM, 0),
-        ref_g = coalesce(RFBRGM, 0) + coalesce(RFSVGM, 0) + coalesce(RFMFGM, 0)
+        wg_g  = GRAMWGT * adg_wg_total  / 100,
+        ref_g = GRAMWGT * adg_ref_total / 100
       ) %>%
-      group_by(person_uid, DAYNUM) %>%
+      group_by(ABSPID, DAYNUM) %>%
       summarise(
         bas_wg_g_d    = sum(wg_g,  na.rm = TRUE),
         bas_ref_g_d   = sum(ref_g, na.rm = TRUE),
         bas_total_g_d = bas_wg_g_d + bas_ref_g_d,
         .groups = "drop"
       ),
-    by = c("person_uid", "DAYNUM")
+    by = c("ABSPID", "DAYNUM")
   ) %>%
   mutate(across(c(bas_total_g_d, bas_wg_g_d, bas_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-# --- 4d. Person-level means across valid recall days ------------------------
 bread_alone_person <- bread_alone_pd %>%
-  group_by(person_uid) %>%
+  group_by(ABSPID) %>%
   summarise(
     ba_total_g = mean(ba_total_g_d),
     ba_wg_g    = mean(ba_wg_g_d),
@@ -344,7 +276,7 @@ bread_alone_person <- bread_alone_pd %>%
   )
 
 bread_allsrc_person <- bread_allsrc_pd %>%
-  group_by(person_uid) %>%
+  group_by(ABSPID) %>%
   summarise(
     bas_total_g = mean(bas_total_g_d),
     bas_wg_g    = mean(bas_wg_g_d),
@@ -352,13 +284,12 @@ bread_allsrc_person <- bread_allsrc_pd %>%
     .groups     = "drop"
   )
 
-# --- 4e. Person-level mean energy (kcal/day) across the SAME recall days ----
 persons <- persons %>%
   mutate(
-    energy_kcal_d1 = if_else(has_d1 & !is.na(ENERGYF1),
-                             ENERGYF1 / 4.184, NA_real_),
-    energy_kcal_d2 = if_else(has_d2 & !is.na(ENERGYF2),
-                             ENERGYF2 / 4.184, NA_real_),
+    energy_kcal_d1 = if_else(has_d1 & !is.na(ENERGYT1),
+                             ENERGYT1 / 4.184, NA_real_),
+    energy_kcal_d2 = if_else(has_d2 & !is.na(ENERGYT2),
+                             ENERGYT2 / 4.184, NA_real_),
     mean_energy_kcal = case_when(
       has_d1 & has_d2 & !is.na(energy_kcal_d1) & !is.na(energy_kcal_d2) ~
         (energy_kcal_d1 + energy_kcal_d2) / 2,
@@ -368,10 +299,9 @@ persons <- persons %>%
     )
   )
 
-# --- 4f. Merge bread intakes onto persons -----------------------------------
 persons <- persons %>%
-  left_join(bread_alone_person,  by = "person_uid") %>%
-  left_join(bread_allsrc_person, by = "person_uid")
+  left_join(bread_alone_person,   by = "ABSPID") %>%
+  left_join(bread_allsrc_person,  by = "ABSPID")
 
 n_no_recall <- sum(persons$n_days == 0L)
 if (n_no_recall > 0) {
@@ -380,58 +310,51 @@ if (n_no_recall > 0) {
 }
 
 # =============================================================================
-# SECTION 5: Energy-plausibility flag using ABS-derived EIBMR1/EIBMR2
+# SECTION 5: Schofield BMR and Goldberg-style energy plausibility flag
 # =============================================================================
-# NNPAS 2023 provides BMR (Schofield-style, on imputed measured weight/height)
-# and EIBMR1/EIBMR2 (energy-intake-to-BMR ratio per recall day) directly on
-# the SPS file. We use these instead of recomputing BMR ourselves:
-#   - mean_eibmr = mean of EIBMR across the same valid recall days used for
-#     bread and energy (1 day or 2).
-#   - Implausible if mean_eibmr < 0.9 or > 2.4 (Goldberg cutoffs).
-#   - Children <10y exempt (always treated as plausible).
-#   - Pregnant women: ABS does not impute their measured weight/height, so
-#     BMR (and therefore EIBMR1/EIBMR2) is NA -- they fall through the
-#     "can't screen -> retain" branch automatically.
-#   - Anyone else with NA EI:BMR (e.g. missing energy) is retained as
-#     plausible. They may still be excluded from EA estimates for missing
-#     energy via the energy_adjust_residual eligibility check, but we never
-#     mark them as implausible.
+schofield_bmr_mj <- function(weight_kg, age, sex) {
+  case_when(
+    is.na(weight_kg) | is.na(age) | is.na(sex)        ~ NA_real_,
+    sex == 1L & age <  3                              ~ 0.249 * weight_kg - 0.127,
+    sex == 1L & age >=  3 & age < 10                  ~ 0.095 * weight_kg + 2.110,
+    sex == 1L & age >= 10 & age < 18                  ~ 0.074 * weight_kg + 2.754,
+    sex == 1L & age >= 18 & age < 30                  ~ 0.063 * weight_kg + 2.896,
+    sex == 1L & age >= 30 & age < 60                  ~ 0.048 * weight_kg + 3.653,
+    sex == 1L & age >= 60                             ~ 0.049 * weight_kg + 2.459,
+    sex == 2L & age <  3                              ~ 0.244 * weight_kg - 0.130,
+    sex == 2L & age >=  3 & age < 10                  ~ 0.085 * weight_kg + 2.033,
+    sex == 2L & age >= 10 & age < 18                  ~ 0.056 * weight_kg + 2.898,
+    sex == 2L & age >= 18 & age < 30                  ~ 0.062 * weight_kg + 2.036,
+    sex == 2L & age >= 30 & age < 60                  ~ 0.034 * weight_kg + 3.538,
+    sex == 2L & age >= 60                             ~ 0.038 * weight_kg + 2.755,
+    TRUE                                              ~ NA_real_
+  )
+}
 
 persons <- persons %>%
   mutate(
-    # ABS reserved codes -- treat as missing. BMR uses 99998 = N/A (e.g.,
-    # pregnant women whose h/w wasn't imputed). EIBMR1/EIBMR2 use 97/98
-    # as "Not applicable / Not stated"; real EI:BMR ratios are always
-    # well under 10.
-    EIBMR1_clean = if_else(as.numeric(EIBMR1) >= 90, NA_real_, as.numeric(EIBMR1)),
-    EIBMR2_clean = if_else(as.numeric(EIBMR2) >= 90, NA_real_, as.numeric(EIBMR2)),
-    eibmr_d1 = if_else(has_d1, EIBMR1_clean, NA_real_),
-    eibmr_d2 = if_else(has_d2, EIBMR2_clean, NA_real_),
-    mean_eibmr = case_when(
-      has_d1 & has_d2 & !is.na(eibmr_d1) & !is.na(eibmr_d2) ~
-        (eibmr_d1 + eibmr_d2) / 2,
-      has_d1 & !is.na(eibmr_d1) ~ eibmr_d1,
-      has_d2 & !is.na(eibmr_d2) ~ eibmr_d2,
-      TRUE                      ~ NA_real_
-    ),
+    bmr_kcal = schofield_bmr_mj(PHDKGWBC, AGE, sex) * 239.006,
+    ei_bmr_ratio = if_else(!is.na(bmr_kcal) & bmr_kcal > 0,
+                           mean_energy_kcal / bmr_kcal, NA_real_),
+    pregnant_flag = !is.na(PREGNANT) & PREGNANT == 1,
     energy_implausible = case_when(
-      AGE99 < 10                          ~ FALSE,   # exempt young children
-      is.na(mean_eibmr)                   ~ FALSE,   # can't screen -> retain
-      mean_eibmr < 0.9 | mean_eibmr > 2.4 ~ TRUE,
-      TRUE                                ~ FALSE
+      AGE < 10                                ~ FALSE,
+      pregnant_flag                           ~ FALSE,
+      is.na(ei_bmr_ratio)                     ~ FALSE,  # can't screen -> retain
+      ei_bmr_ratio < 0.9 | ei_bmr_ratio > 2.4 ~ TRUE,
+      TRUE                                    ~ FALSE
     )
   )
 
-n_impl       <- sum(persons$energy_implausible, na.rm = TRUE)
-n_eibmr_miss <- sum(is.na(persons$mean_eibmr))
-n_screened   <- sum(!is.na(persons$mean_eibmr) & persons$AGE99 >= 10)
-cat("\nEnergy plausibility (ABS EIBMR + Goldberg <0.9 or >2.4):\n")
-cat("  Mean EI:BMR not available: ", n_eibmr_miss,
-    "(retained as plausible -- includes pregnant women whose BMR is NA)\n")
+n_impl     <- sum(persons$energy_implausible, na.rm = TRUE)
+n_bmr_miss <- sum(is.na(persons$bmr_kcal))
+cat("\nEnergy plausibility (Schofield BMR + Goldberg <0.9 or >2.4):\n")
+cat("  BMR not calculable:        ", n_bmr_miss, "(retained for unadjusted)\n")
 cat("  Flagged implausible:       ", n_impl,
-    sprintf("(%.1f%% of %d screened)\n", 100 * n_impl / max(1, n_screened),
-            n_screened))
-cat("  Exempt (AGE99 < 10):       ", sum(persons$AGE99 < 10), "\n")
+    sprintf("(%.1f%% of those screened)\n",
+            100 * n_impl / max(1, sum(!is.na(persons$energy_implausible)))))
+cat("  Exempt (preg or AGE<10):   ",
+    sum((persons$AGE < 10) | persons$pregnant_flag), "\n")
 
 # =============================================================================
 # SECTION 6: Energy adjustment (residual method, log-log, pooled per outcome)
@@ -478,6 +401,8 @@ for (vn in bread_vars) {
 # =============================================================================
 # SECTION 7: Survey design (jackknife replicates)
 # =============================================================================
+rep_wt_cols <- paste0("WPM01", sprintf("%02d", 1:60))
+
 svy_design <- persons %>%
   as_survey_rep(
     weights    = NPAFINWT,
@@ -653,30 +578,30 @@ results_ea <- map_dfr(ea_subtype_map, function(info) {
 # SECTION 9: Assemble final output
 # =============================================================================
 ba_notes <- paste(
-  "Bread alone = explicit AUSNUT 2023 code list:",
-  "12201001-12305002, 12305004-12305007, 12306001-12306004,",
-  "13201001, 13201002, 13201018, 13201019, 13202001, 13204003.",
+  "Bread alone = explicit AUSNUT 2011-13 code list:",
+  "12201001-12203017, 12203022-12305006, 12307001-12307004,",
+  "13201001, 13201002, 13201010, 13201012,",
+  "13203001, 13203002, 13205003.",
   "Bread all sources = bread-alone list plus mixed-dish codes",
-  "(13503001-13504001, 13504004-13507004, 13507008-13507012,",
-  "13507016-13507019). Bread g per food record summed across",
-  "WGBRGM+WGSVGM+WGMFGM (wholegrain) and RFBRGM+RFSVGM+RFMFGM (refined),",
-  "all already in grams per the AUSNUT 2023 disaggregation.",
+  "(13503001-13507004, 13507014-13507036, 13508012),",
+  "with bread g disaggregated via ADG columns 1011/1015/1017 (wholegrain)",
+  "and 1021/1025/1027 (refined).",
   "Person-level mean intake averaged across all valid recall days,",
   "with 0-intake days retained.",
   "Energy adjustment: residual method, log(bread) ~ log(energy),",
   "fitted unweighted on consumers only, standardized to 2000 kcal/day;",
   "non-consumers assigned 0 g/day adjusted intake.",
-  "Energy plausibility: ABS-derived BMR + EIBMR1/EIBMR2 used directly",
-  "(Goldberg cutoffs <0.9 or >2.4 applied to mean EI:BMR across recall days);",
-  "children <10y exempt; pregnant women retained (ABS sets their BMR to NA).",
-  "Urban = ARIA21SL 0-1; Rural = ARIA21SL 2-4."
+  "Energy plausibility: Schofield BMR + Goldberg EI:BMR <0.9 or >2.4;",
+  "pregnant women and children <10y exempt.",
+  "Urban = ARIABC 1-2; Rural = ARIABC 3.",
+  "Education for children <15 assigned from highest-educated household adult."
 )
 
 final_output <- bind_rows(results_unadj, results_ea) %>%
   mutate(
     survey_name = "National Nutrition and Physical Activity Survey",
-    year_start  = 2023L,
-    year_end    = 2024L,
+    year_start  = 2011L,
+    year_end    = 2012L,
     notes       = if_else(bread_def == 1 & energy_adj == 1, ba_notes,
                           NA_character_),
     mean_g            = round(mean_g, 1),
@@ -699,7 +624,7 @@ final_output <- bind_rows(results_unadj, results_ea) %>%
           sex, residence, edu_level, age_grp)
 
 # =============================================================================
-# SECTION 10: QC checks
+# SECTION 10: QC
 # =============================================================================
 cat("\n=== FINAL OUTPUT SUMMARY ===\n")
 cat("Total rows:", nrow(final_output), "\n\n")
@@ -730,18 +655,6 @@ if (max(final_output$n, na.rm = TRUE) > nrow(persons)) {
 # =============================================================================
 # SECTION 11: Statistical Disclosure Control (cell suppression flags)
 # =============================================================================
-# suppress = "P": primary suppression (n < MIN_CELL_N)
-# suppress = "S": secondary suppression (prevents back-calculation via total)
-#
-# Additive relationships guarded:
-#   (1) bread_subtype: 0 = 1 + 2   - binary complement rule
-#   (2) sex:           0 = 1 + 2   - binary complement rule
-#   (3) age_grp:       0 = sum(1:12)
-#
-# Note: the additivity guard for bread_subtype is enforced for unadjusted
-# estimates (energy_adj == 1) only; EA estimates are not expected to be
-# additive, so back-calculation via WG + Refined = Total is not a route.
-
 final_output <- final_output %>%
   mutate(suppress_primary = !is.na(n) & n < MIN_CELL_N)
 
@@ -800,7 +713,8 @@ final_output <- final_output %>%
       TRUE                                                         ~ ""
     )
   ) %>%
-  select(-suppress_primary, -suppress_sec_subtype, -suppress_sec_sex, -suppress_sec_age)
+  select(-suppress_primary, -suppress_sec_subtype,
+         -suppress_sec_sex, -suppress_sec_age)
 
 cat("\nCell suppression summary (MIN_CELL_N =", MIN_CELL_N, "):\n")
 final_output %>% count(suppress) %>% print()
@@ -818,47 +732,46 @@ cat("\n--- Filling GBI Excel template ---\n")
 
 wb <- loadWorkbook(template_path)
 
-n_total       <- nrow(persons)
-n_two_day     <- sum(persons$has_d1 & persons$has_d2)
-sample_text   <- sprintf("%s persons (%s with 2-day recall)",
-                         format(n_total, big.mark = ","),
-                         format(n_two_day, big.mark = ","))
+n_total   <- nrow(persons)
+n_two_day <- sum(persons$has_d1 & persons$has_d2)
+sample_text <- sprintf("%s persons (%s with 2-day recall)",
+                       format(n_total, big.mark = ","),
+                       format(n_two_day, big.mark = ","))
 
 survey_info <- list(
   c(3,  "National Nutrition and Physical Activity Survey (NNPAS)"),
   c(4,  "Australia"),
-  c(5,  "Started January 2023, finished March 2024"),
+  c(5,  "2011-2012"),
   c(6,  "National (all states and territories, urban and rural)"),
   c(7,  "Persons aged 2 years and over, usual residents of private dwellings"),
   c(8,  sample_text),
-  c(9,  "24-hour dietary recall (Intake24-based, web/CATI administered)"),
-  c(10, paste("2 days for most respondents (Day 1 face-to-face/web,",
-              "Day 2 follow-up); person-level mean intakes averaged",
+  c(9,  "24-hour dietary recall (interviewer-administered, AMPM method)"),
+  c(10, paste("2 days for most respondents (Day 1 face-to-face,",
+              "Day 2 telephone); person-level mean intakes averaged",
               "across all valid recall days.")),
   c(11, paste("Multi-stage area probability sample of private dwellings;",
               "stratified by state/territory and capital city/rest of state")),
-  c(12, "Yes -- NPAFINWT (selected-person Day-1 weight)"),
+  c(12, "Yes -- NPAFINWT (Day-1 person weight)"),
   c(13, "Yes -- 60 jackknife replicate weights (WPM0101-WPM0160)"),
-  c(14, paste("ABS, Microdata: National Nutrition and Physical Activity Survey,",
-              "Australia, 2023 (DataLab/SAS unit-record files);",
-              "measured height/weight imputed (hot-deck) by ABS so BMR is",
-              "calculable for almost all records")),
-  c(15, "AUSNUT 2023 (ABS/FSANZ)"),
-  c(16, paste("Bread alone: explicit AUSNUT 2023 code list per GBI",
+  c(14, paste("ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey,",
+              "Nutrition and Physical Activity, 2011-12, Basic CURF",
+              "(with measured height/weight imputed for missing values)")),
+  c(15, "AUSNUT 2011-13 (ABS/FSANZ); ADG Database used for mixed-dish disaggregation"),
+  c(16, paste("Bread alone: explicit AUSNUT 2011-13 code list per GBI",
               "2026-05 specification clarification",
-              "(12201001-12305002, 12305004-12305007, 12306001-12306004,",
-              "13201001, 13201002, 13201018, 13201019, 13202001, 13204003).",
-              "Wholegrain vs refined classified by description keyword",
-              "(wholemeal/wholegrain/multigrain/mixed grain/rye/spelt/",
-              "pumpernickel/added fibre/high fibre/chapatti/injera/roti)",
-              "-> wholegrain; else AUSNUT WGBRGM vs RFBRGM majority;",
-              "else FIBRE > 5 g/100 g -> wholegrain; default refined.")),
+              "(12201001-12203017, 12203022-12305006, 12307001-12307004,",
+              "13201001, 13201002, 13201010, 13201012,",
+              "13203001, 13203002, 13205003).",
+              "Wholegrain vs refined classified by ADG columns",
+              "1011/1015/1017 vs 1021/1025/1027 majority,",
+              "with keyword fallback (wholemeal/wholegrain/multigrain/",
+              "mixed grain/rye/spelt/pumpernickel/added fibre/high fibre/",
+              "chapatti/injera/roti) and refined default.")),
   c(17, paste("Bread all sources: bread-alone codes plus mixed-dish codes",
-              "13503001-13504001, 13504004-13507004, 13507008-13507012,",
-              "13507016-13507019.",
-              "For each food record, bread g summed from WGBRGM+WGSVGM+WGMFGM",
-              "(wholegrain) and RFBRGM+RFSVGM+RFMFGM (refined), which the",
-              "AUSNUT 2023 disaggregation already provides in grams per record.")),
+              "13503001-13507004, 13507014-13507036, 13508012.",
+              "Bread g extracted from each food via ADG g/100g lookup,",
+              "using columns 1011 + 1015 + 1017 (wholegrain) and",
+              "1021 + 1025 + 1027 (refined) summed over each food record.")),
   c(18, paste("Residual method on the log scale (per GBI 2026-04 note):",
               "fit log(bread) ~ log(energy_kcal) once per bread outcome",
               "across all consumers (unweighted; pooled across strata);",
@@ -867,18 +780,14 @@ survey_info <- list(
               "Implausible energy reporters (and persons with missing",
               "energy or BMR) excluded from EA estimates only;",
               "they remain in the unadjusted estimates.")),
-  c(19, paste("Energy plausibility: ABS-derived BMR (Schofield-style on the",
-              "imputed measured height/weight) and EIBMR1/EIBMR2 (energy-",
-              "intake-to-BMR ratio per recall day) read directly from the",
-              "NNPAS 2023 SPS file. Flag mean EI:BMR (across valid recall",
-              "days) < 0.9 or > 2.4 (Goldberg cutoffs).",
-              "Children <10y exempt. Pregnant women are retained: ABS does",
-              "not impute their measured weight/height, so BMR is NA and",
-              "they fall through the 'can't screen -> retain' branch.",
-              "Sex = SEXBIRTH; education from HIGHLVLD (children <15 assigned",
-              "highest-educated adult in household).",
-              "Urban = ARIA21SL 0-1; Rural = ARIA21SL 2-4.",
-              "Day-1 energy = ENERGYF1 (food only, kJ -> kcal /4.184).",
+  c(19, paste("Energy plausibility: Schofield (1985) weight-based BMR;",
+              "flag EI:BMR < 0.9 or > 2.4 (Goldberg cutoffs).",
+              "Pregnant women and children <10y exempt and always retained.",
+              "Measured height and weight are imputed (hot-deck by ABS-style",
+              "approach) so BMR is calculable for almost all records.",
+              "Urban = ARIABC 1-2; Rural = ARIABC 3.",
+              "Education for children <15 assigned from highest-educated",
+              "adult in the household.",
               "Person-level mean intake = mean across all valid recall days",
               "(0-intake days retained as true zeros).",
               "SD reported = weighted empirical SD of person-level means",
@@ -899,20 +808,17 @@ codebook_availability <- rep("Yes", 17)
 codebook_comments <- c(
   NA, NA, NA,
   "Both bread alone (1) and bread all sources (2) provided per GBI 2026-05 code lists.",
-  paste("Wholegrain/refined classification of bread-alone items:",
-        "description keyword -> WGBRGM/RFBRGM majority -> FIBRE > 5 g/100 g;",
-        "default refined."),
+  paste("Wholegrain/refined classification based on ADG Database columns",
+        "1011+1015+1017 (WG) vs 1021+1025+1027 (Refined),",
+        "with keyword fallback and refined default."),
   paste("Both unadjusted (1) and energy-adjusted (2) estimates provided.",
         "Energy adjustment is the residual method (log-log) standardised",
         "to 2,000 kcal/day, fitted unweighted on consumers only."),
-  "Sex = SEXBIRTH (sex at birth) on the NNPAS 2023 selected-person file.",
-  paste("Urban = ARIA21SL 0 (Major cities) + 1 (Inner regional);",
-        "Rural = ARIA21SL 2 (Outer regional) + 3 (Remote) + 4 (Very remote)."),
-  paste("Mapped from HIGHLVLD: Tertiary = postgraduate, bachelor, advanced",
-        "diploma/diploma, certificate III/IV; Secondary = year 10-12,",
-        "certificate I/II; Primary = year 9 or below, no educational",
-        "attainment. Children <15: highest-educated adult in household."),
-  "NNPAS age range is 2 years and over. Mapped to GBI bands; band 12 = 85+.",
+  NA,
+  "Urban = ARIABC 1 (Major cities) + 2 (Inner regional). Rural = ARIABC 3.",
+  paste("Mapped from NNPAS: Tertiary = LVHNSQBC 1-4; Secondary = HYSCHCBC 1-3;",
+        "Primary = HYSCHCBC 4-5. Children <15: highest-educated adult in household."),
+  "NNPAS age range is 2-85+. Mapped to GBI bands; band 12 = 85+.",
   NA,
   paste("Weighted mean using NPAFINWT, of person-level mean intake",
         "(averaged across all valid recall days; 0-intake days retained)."),
@@ -954,3 +860,6 @@ saveWorkbook(wb, output_xlsx, overwrite = TRUE)
 cat("\nFilled Excel template saved to:", output_xlsx, "\n")
 
 cat("\n=== ALL DONE ===\n")
+
+
+

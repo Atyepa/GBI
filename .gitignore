@@ -8,10 +8,16 @@ GBI_DataTemplate_NNPAS_2011-12.csv
 GBI_AggregateDataForm_NNPAS_2011-12.xlsx
 GBI_DataTemplate_NNPAS_2023.csv
 GBI_AggregateDataForm_NNPAS_2023.xlsx
+bread_alone_classification_NNPAS_2011_12.csv
 bread_alone_classification_NNPAS_2023.csv
 
-# Personal working notes (not for public repo)
+# Personal working notes / local testing helpers (not for public repo)
 Instructions.md
+fake_2023_for_local_testing.R
+
+# GBI Aggregate Data Form workbook (template — not for public sharing)
+GBI_Aggregate_Data_Form.xlsx
+GBI_Aggregate_Data_Form_unprotected.xlsx
 
 # R session files
 .Rhistory

@@ -1,27 +1,17 @@
 # =============================================================================
-# GBI Aggregate Bread Intake Estimates -- NNPAS 2023
+# GBI Aggregate Bread Intake Estimates -- NNPAS 2023  (LOCAL / DUMMY COPY)
 # =============================================================================
-# Produces population-level bread intake estimates from the ABS 2023
-# National Nutrition and Physical Activity Survey (NNPAS), formatted for
-# the Global Bread Intake (GBI) Study aggregate data request.
+# Local-testing version of GBI_bread_estimates_NNPAS_2023.R.
+# Identical analytical logic to the production script. Two differences only:
+#   - Loads pre-saved dummy microdata frames via read_rds() (the real
+#     sas7bdat unit-record files are not available outside the DataLab).
+#   - Paths point to the local dummy-data directory and the GBI folder
+#     for outputs.
+# Keep changes here mirrored against the production script.
 #
 # Updated 2026-05 to follow the GBI methodological clarification note
-# ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026):
-#   - Person-level mean intakes are computed across all valid recall days
-#     (Day 1 and, where available, Day 2), with zero-intake days retained.
-#   - Energy-adjusted intake (residual method, log-log, standardized to
-#     2,000 kcal/day) is the preferred output, alongside unadjusted intake.
-#   - Energy-plausibility screening uses Schofield BMR + Goldberg cutoffs
-#     (EI:BMR < 0.9 or > 2.4). Children <10y and pregnant women are exempt
-#     from this filter and are always retained.
-#   - SDs are now the weighted empirical SD of person-level mean intakes
-#     within each stratum (no ANOVA partitioning).
-#   - Bread alone uses an explicit AUSNUT 2023 code list (per 2026-05 spec).
-#   - Bread all sources is computed by summing food-record-level wholegrain
-#     and refined bread g across three "ADG-category" pairs:
-#       wholegrain  = WGBRGM + WGSVGM + WGMFGM
-#       refined     = RFBRGM + RFSVGM + RFMFGM
-#     restricted to food records whose FOODCODL is in the all-bread list.
+# ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026). See
+# the production script header for the full change list.
 # =============================================================================
 
 library(tidyverse)
@@ -32,15 +22,16 @@ library(srvyr)
 library(openxlsx)
 
 # --- Paths ----------------------------------------------------------------
-nnpas_dir   <- "NNPAS_2023"
+nnpas_dir   <- "C:\\Users\\atyeo\\OneDrive\\R data\\NNPAS2023\\Dummy microdata"
 ausnut_path <- file.path(nnpas_dir, "AUSNUT_2023.xlsx")
-hhd_path    <- file.path(nnpas_dir, "nnpas23hhd.sas7bdat")
-sps_path    <- file.path(nnpas_dir, "nnpas23sps.sas7bdat")
-food_path   <- file.path(nnpas_dir, "nnpas23food.sas7bdat")
+hhd_path    <- file.path(nnpas_dir, "nnpas23hhd.rds")
+sps_path    <- file.path(nnpas_dir, "nnpas23sps.rds")
+food_path   <- file.path(nnpas_dir, "nnpas23food.rds")
 
-template_path <- "GBI_Aggregate_Data_Form_unprotected.xlsx"
-output_csv    <- "GBI_DataTemplate_NNPAS_2023.csv"
-output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2023.xlsx"
+GBI_path      <- "C:\\Users\\atyeo\\OneDrive\\R data\\GBI"
+template_path <- file.path(GBI_path, "GBI_Aggregate_Data_Form_unprotected.xlsx")
+output_csv    <- file.path(GBI_path, "GBI_DataTemplate_NNPAS_2023.csv")
+output_xlsx   <- file.path(GBI_path, "GBI_AggregateDataForm_NNPAS_2023.xlsx")
 
 # --- Disclosure-control "rule of n" --------------------------------------
 # Minimum cell size below which a stratum is primary-suppressed.
@@ -52,7 +43,6 @@ MIN_CELL_N <- 3
 # SECTION 1: AUSNUT 2023 food-code lists and bread-alone classification
 # =============================================================================
 
-# --- 1a. AUSNUT 2023 code lists (per 2026-05 GBI spec clarification) --------
 bread_alone_codes_2023 <- c(
   12201001:12305002, 12305004:12305007, 12306001:12306004,
   13201001:13201002, 13201018:13201019,
@@ -65,12 +55,6 @@ all_bread_codes_2023 <- c(
   13507008:13507012, 13507016:13507019
 )
 
-# --- 1b. Bread-alone wholegrain/refined classification ----------------------
-# Layered classification:
-#   Rule A: description keyword match -> wholegrain.
-#   Rule B: AUSNUT 2023 WGBRGM vs RFBRGM majority.
-#   Rule C: FIBRE > 5 g/100 g -> wholegrain.
-#   Default: refined.
 ausnut <- read_excel(ausnut_path, sheet = 1)
 
 bread_alone_codes <- ausnut %>%
@@ -100,34 +84,19 @@ cat("Standalone bread codes in AUSNUT 2023 list:", nrow(bread_alone_codes), "\n"
 cat("Classification breakdown:\n")
 count(bread_alone_codes, bread_class) %>% print()
 
-write_csv(bread_alone_codes, "bread_alone_classification_NNPAS_2023.csv")
+write_csv(bread_alone_codes,
+          file.path(GBI_path, "bread_alone_classification_NNPAS_2023.csv"))
 
 # =============================================================================
-# SECTION 2: Load NNPAS 2023 unit-record files
+# SECTION 2: Load NNPAS 2023 dummy unit-record files
 # =============================================================================
 
-# --- 2a. Household file -----------------------------------------------------
-hhd <- read_sas(hhd_path) %>%
+hhd <- read_rds(hhd_path) %>%
   select(ABSHIDD, ARIA21SL)
 
 cat("\nHouseholds loaded:", nrow(hhd), "\n")
 
-# --- 2b. Selected person file -----------------------------------------------
-# Includes:
-#   identifiers, weights, replicate weights,
-#   age (AGE99), sex (SEXBIRTH), education (HIGHLVLD),
-#   Day-1 / Day-2 energy (ENERGYF1, ENERGYF2),
-#   Day-2 food count (COUNTFD2),
-#   measured height (cm) and weight (kg) from the imputed CURF,
-#   pregnancy flag.
-#
-# Column-name notes (verify against your 2023 DIL):
-#   PHDCMHBC / PHDKGWBC -- measured height (cm) and weight (kg),
-#                          imputed values overwrite 997/998 codes.
-#   PREGNANT             -- pregnancy flag (1 = pregnant). If the 2023
-#                          DIL uses a different code (e.g. PREGCOND),
-#                          rename to PREGNANT below.
-sps <- read_sas(sps_path) %>%
+sps <- read_rds(sps_path) %>%
   rename(ABSPID = ABSPIDD)
 
 rep_wt_cols <- grep("^WPM01[0-9]{2}$", names(sps), value = TRUE)
@@ -160,11 +129,7 @@ if (!"EIBMR2" %in% names(persons)) persons$EIBMR2 <- NA_real_
 
 cat("Persons loaded:", nrow(persons), "\n")
 
-# --- 2c. Food file ----------------------------------------------------------
-# Bring in the six WG*GM/RF*GM columns used for "bread all sources":
-#   WGBRGM, WGSVGM, WGMFGM  -- wholegrain bread (g) by ADG category
-#   RFBRGM, RFSVGM, RFMFGM  -- refined bread (g) by ADG category
-foods <- read_sas(food_path) %>%
+foods <- read_rds(food_path) %>%
   rename(ABSPID = ABSPIDD) %>%
   select(ABSHIDD, ABSPID, DAYNUM, FOODCODL, GRAMWGT,
          WGBRGM, WGSVGM, WGMFGM,
@@ -179,14 +144,12 @@ cat("  Day 2 records:", sum(foods$DAYNUM == 2), "\n")
 # SECTION 3: Stratification and person-level prep
 # =============================================================================
 
-# --- 3a. Exclude any participants aged <2 years (GBI age eligibility) -------
 n_under2 <- sum(persons$AGE99 < 2, na.rm = TRUE)
 if (n_under2 > 0) {
   cat("\nExcluding", n_under2, "participants aged <2 years (GBI eligibility).\n")
   persons <- persons %>% filter(AGE99 >= 2)
 }
 
-# --- 3b. Age groups (GBI bands 1-12) ----------------------------------------
 age_breaks <- c(2, 6, 11, 15, 20, 25, 35, 45, 55, 65, 75, 85, Inf)
 age_labels <- 1:12
 
@@ -199,11 +162,9 @@ persons <- persons %>%
 cat("\nAge group distribution:\n")
 persons %>% count(age_grp) %>% print()
 
-# --- 3c. Sex (SEXBIRTH) -----------------------------------------------------
 persons <- persons %>%
   mutate(sex = as.integer(SEXBIRTH))
 
-# --- 3d. Education ----------------------------------------------------------
 tertiary_codes  <- c("100","110","111","114","120",
                      "200","211","212","213","221","222",
                      "310",
@@ -245,7 +206,6 @@ if (n_edu_na > 0) {
 cat("\nEducation level distribution:\n")
 persons %>% count(edu_level) %>% print()
 
-# --- 3e. Residence (ARIA21SL) -----------------------------------------------
 persons <- persons %>%
   mutate(
     ARIA21SL_n = as.integer(ARIA21SL),
@@ -262,12 +222,7 @@ persons %>% count(residence) %>% print()
 # =============================================================================
 # SECTION 4: Person-level bread intake (mean across all valid recall days)
 # =============================================================================
-# Per GBI 2026-05 spec:
-#   - Each valid recall day contributes to the person-level mean.
-#   - Days with zero bread intake are retained as true zero-intake days.
-#   - The same set of valid days must be used for bread and for energy.
 
-# --- 4a. Valid recall days per person ---------------------------------------
 person_recall_days <- foods %>%
   distinct(person_uid, DAYNUM) %>%
   group_by(person_uid) %>%
@@ -291,7 +246,6 @@ persons %>% count(has_d1, has_d2) %>% print()
 
 recall_days_long <- foods %>% distinct(person_uid, DAYNUM)
 
-# --- 4b. Bread alone per (person, day) --------------------------------------
 bread_alone_pd <- recall_days_long %>%
   left_join(
     foods %>%
@@ -310,9 +264,6 @@ bread_alone_pd <- recall_days_long %>%
   mutate(across(c(ba_total_g_d, ba_wg_g_d, ba_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-# --- 4c. Bread all sources per (person, day) --------------------------------
-# Filter to all-bread food codes, then sum the three WG / three RF columns
-# (already in g per food record from AUSNUT 2023).
 bread_allsrc_pd <- recall_days_long %>%
   left_join(
     foods %>%
@@ -333,7 +284,6 @@ bread_allsrc_pd <- recall_days_long %>%
   mutate(across(c(bas_total_g_d, bas_wg_g_d, bas_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-# --- 4d. Person-level means across valid recall days ------------------------
 bread_alone_person <- bread_alone_pd %>%
   group_by(person_uid) %>%
   summarise(
@@ -352,7 +302,6 @@ bread_allsrc_person <- bread_allsrc_pd %>%
     .groups     = "drop"
   )
 
-# --- 4e. Person-level mean energy (kcal/day) across the SAME recall days ----
 persons <- persons %>%
   mutate(
     energy_kcal_d1 = if_else(has_d1 & !is.na(ENERGYF1),
@@ -368,7 +317,6 @@ persons <- persons %>%
     )
   )
 
-# --- 4f. Merge bread intakes onto persons -----------------------------------
 persons <- persons %>%
   left_join(bread_alone_person,  by = "person_uid") %>%
   left_join(bread_allsrc_person, by = "person_uid")
@@ -730,18 +678,6 @@ if (max(final_output$n, na.rm = TRUE) > nrow(persons)) {
 # =============================================================================
 # SECTION 11: Statistical Disclosure Control (cell suppression flags)
 # =============================================================================
-# suppress = "P": primary suppression (n < MIN_CELL_N)
-# suppress = "S": secondary suppression (prevents back-calculation via total)
-#
-# Additive relationships guarded:
-#   (1) bread_subtype: 0 = 1 + 2   - binary complement rule
-#   (2) sex:           0 = 1 + 2   - binary complement rule
-#   (3) age_grp:       0 = sum(1:12)
-#
-# Note: the additivity guard for bread_subtype is enforced for unadjusted
-# estimates (energy_adj == 1) only; EA estimates are not expected to be
-# additive, so back-calculation via WG + Refined = Total is not a route.
-
 final_output <- final_output %>%
   mutate(suppress_primary = !is.na(n) & n < MIN_CELL_N)
 
@@ -800,7 +736,8 @@ final_output <- final_output %>%
       TRUE                                                         ~ ""
     )
   ) %>%
-  select(-suppress_primary, -suppress_sec_subtype, -suppress_sec_sex, -suppress_sec_age)
+  select(-suppress_primary, -suppress_sec_subtype,
+         -suppress_sec_sex, -suppress_sec_age)
 
 cat("\nCell suppression summary (MIN_CELL_N =", MIN_CELL_N, "):\n")
 final_output %>% count(suppress) %>% print()

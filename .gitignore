@@ -10,6 +10,7 @@ GBI_DataTemplate_NNPAS_2023.csv
 GBI_AggregateDataForm_NNPAS_2023.xlsx
 bread_alone_classification_NNPAS_2011_12.csv
 bread_alone_classification_NNPAS_2023.csv
+GBI_run_report_*.txt
 
 # Personal working notes / local testing helpers (not for public repo)
 # The *_local.R scripts are personal dummy/local-data testing copies that

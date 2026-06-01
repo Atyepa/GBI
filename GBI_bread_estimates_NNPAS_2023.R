@@ -48,6 +48,25 @@ output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2023.xlsx"
 # (e.g., MIN_CELL_N <- 10) when preparing data for DataLab clearance.
 MIN_CELL_N <- 3
 
+# --- Run report -----------------------------------------------------------
+# Tee every console diagnostic below (all cat()/print() output) to a plain-
+# text report while still showing it in the console. Set REPORT <- FALSE to
+# disable; swap report_path for the commented timestamp form to keep every run.
+REPORT      <- TRUE
+report_path <- "GBI_run_report_NNPAS_2023.txt"
+# report_path <- format(Sys.time(), "GBI_run_report_NNPAS_2023_%Y%m%d_%H%M%S.txt")
+if (REPORT) {
+  while (sink.number() > 0) sink()        # clear any stray sink from a failed run
+  report_con <- file(report_path, open = "wt")
+  sink(report_con, split = TRUE)
+  cat(strrep("=", 78), "\n")
+  cat("GBI bread-intake estimator -- run report\n")
+  cat("Script     :", "GBI_bread_estimates_NNPAS_2023.R", "\n")
+  cat("Run at     :", format(Sys.time()), "\n")
+  cat("MIN_CELL_N :", MIN_CELL_N, "\n")
+  cat(strrep("=", 78), "\n\n")
+}
+
 # =============================================================================
 # SECTION 1: AUSNUT 2023 food-code lists and bread-alone classification
 # =============================================================================
@@ -954,3 +973,10 @@ saveWorkbook(wb, output_xlsx, overwrite = TRUE)
 cat("\nFilled Excel template saved to:", output_xlsx, "\n")
 
 cat("\n=== ALL DONE ===\n")
+
+# --- Close the run report -------------------------------------------------
+if (REPORT) {
+  sink(); close(report_con)
+  message("Run report written to: ",
+          normalizePath(report_path, mustWork = FALSE))
+}

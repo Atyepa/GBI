@@ -12,8 +12,11 @@ bread_alone_classification_NNPAS_2011_12.csv
 bread_alone_classification_NNPAS_2023.csv
 
 # Personal working notes / local testing helpers (not for public repo)
+# The *_local.R scripts are personal dummy/local-data testing copies that
+# carry absolute machine paths; keep them off the public repo.
 Instructions.md
 fake_2023_for_local_testing.R
+*_local.R
 
 # GBI Aggregate Data Form workbook (template — not for public sharing)
 GBI_Aggregate_Data_Form.xlsx

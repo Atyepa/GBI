@@ -44,8 +44,8 @@ output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2023.xlsx"
 
 # --- Disclosure-control "rule of n" --------------------------------------
 # Minimum cell size below which a stratum is primary-suppressed.
-# 3 is a common general rule; ABS DataLab egress requires 10. Change here
-# (e.g., MIN_CELL_N <- 10) when preparing data for DataLab clearance.
+# Set this to your agency's required minimum cell size; ABS DataLab egress
+# requires 10 (e.g., MIN_CELL_N <- 10) when preparing data for clearance.
 MIN_CELL_N <- 3
 
 # --- Run report -----------------------------------------------------------

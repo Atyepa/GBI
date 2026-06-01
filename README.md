@@ -73,24 +73,29 @@ install.packages(c("tidyverse", "readxl", "haven", "survey", "srvyr", "openxlsx"
 
 ## Key analytical decisions (shared across both scripts)
 
-- **Day 1 only** for point estimates (means, % non-consumers, energy); Day 2 used only for within-person variance estimation (SD correction via ANOVA on 2-day responders).
+Updated 2026-05 to follow the GBI methodological clarification note (29 April 2026).
+
+- **Person-level means across all valid recall days**: bread intake and total energy are averaged across every valid recall/record day per person (Day 1, and Day 2 where available), with zero-intake days retained as true zeros. Point estimates (means, % non-consumers, energy) use these person-level means — *not* Day 1 alone.
+- **Participants aged <2 years** are excluded (GBI eligibility).
 - **Age groups**: 12 GBI bands (2-5, 6-10, 11-14, 15-19, 20-24, 25-34, 35-44, 45-54, 55-64, 65-74, 75-84, 85+).
 - **Education for children <15**: assigned from the highest-educated adult in the same household.
+- **Energy-adjusted intake** (the preferred output, reported alongside the unadjusted intake): residual method on the log scale — `log(bread) ~ log(energy_kcal)` fitted unweighted on consumers only, pooled across strata, standardised to 2,000 kcal/day; non-consumers are assigned 0 g/day.
+- **Energy-plausibility screening**: Goldberg energy-intake-to-BMR cut-offs (< 0.9 or > 2.4). The 2023 script uses the ABS-derived `BMR` and `EIBMR1`/`EIBMR2`; the 2011-12 script computes a Schofield (1985) BMR. Children < 10 y and pregnant women are exempt and always retained; flagged reporters are dropped from the energy-adjusted estimates only.
+- **SD**: weighted **empirical** standard deviation of the person-level mean intakes within each stratum (no ANOVA / within-person variance partitioning). A companion `sd_kcal` (SD of person-level mean energy) is also reported.
 - **SE**: design-based via jackknife replication (60 replicate weights).
-- **SD**: corrected for within-person variation using the between-person variance ratio from the 2-day subsample.
-- **Energy adjustment**: residual method, with optional log-transform when Shapiro-Wilk indicates non-normal positives.
 
 ## Wave-specific differences
 
 |  | NNPAS 2011-12 | NNPAS 2023 |
 |---|---|---|
-| **Bread "all sources"** | Disaggregated via the ADG Database (g of WG/refined bread per 100 g of any food, multiplied by `GRAMWGT`/100). | Direct sum of food-record-level `WGBRGM` + `RFBRGM` — the ABS already disaggregates per food, so no ADG step is needed. |
-| **Standalone bread codes** | AUSNUT 2011-13 codes 12201001–12307004 | AUSNUT 2023 codes 12201001–12306003 |
-| **Wholegrain/refined classification** | ADG columns 1011/1021 first; description-keyword fallback for items neither column flags. | Layered: description keywords → AUSNUT 2023 `WGBRGM`/`RFBRGM` majority → `FIBRE` > 5 g/100 g → default refined. |
+| **Bread "all sources"** | Disaggregated via the ADG Database: g of bread per 100 g of any food × `GRAMWGT`/100, summing ADG columns 1011+1015+1017 (wholegrain) and 1021+1025+1027 (refined), over the all-bread code list. | Sum of food-record-level `WGBRGM`+`WGSVGM`+`WGMFGM` (wholegrain) and `RFBRGM`+`RFSVGM`+`RFMFGM` (refined) — already disaggregated by the ABS — over the all-bread code list. |
+| **Bread code lists** | Explicit AUSNUT 2011-13 "bread alone" and "all bread" code lists per the 2026-05 GBI specification clarification (not a single range). | Explicit AUSNUT 2023 "bread alone" and "all bread" code lists per the 2026-05 GBI specification clarification. |
+| **Wholegrain/refined classification** | ADG columns 1011+1015+1017 vs 1021+1025+1027 majority; description-keyword fallback; default refined. | Layered: description keywords → AUSNUT 2023 `WGBRGM`/`RFBRGM` majority → `FIBRE` > 5 g/100 g → default refined. |
 | **Sex** | `SEX` | `SEXBIRTH` |
 | **Education** | `HYSCHCBC` + `LVHNSQBC` | `HIGHLVLD` (single combined level) |
 | **Remoteness** | `ARIABC` 1-2 → urban; 3 → rural | `ARIA21SL` 0-1 → urban; 2-4 → rural |
-| **Day-1 energy** | `ENERGYT1` (food + supplements) | `ENERGYF1` (food only) |
+| **Energy** | Person-level mean across recall days of `ENERGYT1`/`ENERGYT2` (kJ → kcal). | Person-level mean across recall days of `ENERGYF1`/`ENERGYF2` (food only, kJ → kcal). |
+| **BMR for plausibility** | Schofield (1985), computed from imputed measured weight. | ABS-derived `BMR` + `EIBMR1`/`EIBMR2` read from the SPS file. |
 | **Recall-day count** | `NUMRECAL` | derived from `COUNTFD2 > 0` |
 | **Person ID** | `ABSPID` (effectively unique in CURF) | concatenated `ABSHIDD` + `ABSPID` (`ABSPID` is only unique within household in DataLab; sas column is actually `ABSPIDD` and is renamed on read) |
 
@@ -121,7 +126,7 @@ sex (0=combined, 1=male, 2=female),
 residence (1=urban, 2=rural, NA=combined),
 edu_level (1=primary, 2=secondary, 3=tertiary, NA=combined),
 age_grp (0=all ages, 1-12=GBI bands),
-n, mean_g, sd_g, se_g, pct_non_consumers, mean_kcal, notes
+n, mean_g, sd_g, se_g, pct_non_consumers, mean_kcal, sd_kcal, notes
 ```
 
 ## Citation / data access

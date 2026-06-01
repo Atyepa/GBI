@@ -38,10 +38,9 @@ output_xlsx   <- "GBI_AggregateDataForm_NNPAS_2011-12.xlsx"
 # --- Disclosure-control "rule of n" --------------------------------------
 # Minimum cell size below which a stratum is primary-suppressed.
 # The 2011-12 Basic CURF is already confidentialised by the ABS, so no
-# further cell suppression is required: MIN_CELL_N = 1 leaves all cells
-# releasable. (For comparison, a general rule of thumb is 3, and ABS DataLab
-# egress requires 10 -- raise this if adapting the script to a
-# non-confidentialised source.)
+# further cell suppression is required here -- MIN_CELL_N = 1 leaves all
+# cells releasable. (ABS DataLab egress, by contrast, requires 10; raise
+# this if adapting the script to a non-confidentialised source.)
 MIN_CELL_N <- 1
 
 # --- Run report -----------------------------------------------------------

@@ -89,7 +89,7 @@ Updated 2026-05 to follow the GBI methodological clarification note (29 April 20
 |  | NNPAS 2011-12 | NNPAS 2023 |
 |---|---|---|
 | **Bread "all sources"** | Disaggregated via the ADG Database: g of bread per 100 g of any food × `GRAMWGT`/100, summing ADG columns 1011+1015+1017 (wholegrain) and 1021+1025+1027 (refined), over the all-bread code list. | Sum of food-record-level `WGBRGM`+`WGSVGM`+`WGMFGM` (wholegrain) and `RFBRGM`+`RFSVGM`+`RFMFGM` (refined) — already disaggregated by the ABS — over the all-bread code list. |
-| **Bread code lists** | Explicit AUSNUT 2011-13 "bread alone" and "all bread" code lists per the 2026-05 GBI specification clarification (not a single range). | Explicit AUSNUT 2023 "bread alone" and "all bread" code lists per the 2026-05 GBI specification clarification. |
+| **Bread code lists** (AUSNUT, per the 2026-05 GBI spec) | **Bread alone**: 12201001–12203017, 12203022–12305006, 12307001–12307004, 13201001, 13201002, 13201010, 13201012, 13203001, 13203002, 13205003. **All bread** adds the mixed-dish codes 13503001–13507004, 13507014–13507036, 13508012. | **Bread alone**: 12201001–12305002, 12305004–12305007, 12306001–12306004, 13201001, 13201002, 13201018, 13201019, 13202001, 13204003. **All bread** adds 13503001–13504001, 13504004–13507004, 13507008–13507012, 13507016–13507019. |
 | **Wholegrain/refined classification** | ADG columns 1011+1015+1017 vs 1021+1025+1027 majority; description-keyword fallback; default refined. | Layered: description keywords → AUSNUT 2023 `WGBRGM`/`RFBRGM` majority → `FIBRE` > 5 g/100 g → default refined. |
 | **Sex** | `SEX` | `SEXBIRTH` |
 | **Education** | `HYSCHCBC` + `LVHNSQBC` | `HIGHLVLD` (single combined level) |

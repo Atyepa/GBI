@@ -20,7 +20,9 @@ library(shinythemes)
 library(shinyWidgets)
 library(DT)
 
-setwd("C:/Users/atyeo/OneDrive/R data/GBI")
+# Run with the repo folder as the working directory (where the CSV inputs
+# live). In RStudio this is automatic if you open the repo as a project; or
+# set it manually, e.g. setwd("path/to/GBI").
 
 options(warn = -1)
 
@@ -73,7 +75,7 @@ dat <- raw %>%
     # dimension. All rows share the same level so the grand-total marginal
     # row (age=All, sex=Persons, res=NA, edu=NA) collapses to one bar.
     overall_label = factor("All persons"),
-    lowerCI       = mean_g - 1.96 * se_g,
+    lowerCI       = pmax(0, mean_g - 1.96 * se_g),
     upperCI       = mean_g + 1.96 * se_g
   )
 
@@ -98,10 +100,12 @@ ui <- fluidPage(
                  choices  = setNames(names(def_lbl), def_lbl),
                  selected = "1", inline = FALSE),
 
-    radioButtons("bread_subtype", "Bread subtype:",
+    checkboxGroupInput("bread_subtype", "Bread subtype:",
                  choices  = setNames(names(subtype_lbl), subtype_lbl),
                  selected = "0", inline = TRUE),
-    helpText(em("To compare all three subtypes, set 'Group by' to 'Bread subtype'.")),
+    helpText(em("Tick Wholegrain + Refined together to stack them within each",
+                "column (hover a segment for its % of total). 'Total bread' must",
+                "be viewed on its own. Use 'Group by' to cluster by wave or sex.")),
 
     radioButtons("energy_adj", "Energy adjustment:",
                  choices  = setNames(names(ea_lbl), ea_lbl),
@@ -118,7 +122,6 @@ ui <- fluidPage(
     selectInput("groupvar", "Group by (series):",
                 choices  = c("(none)"        = "_none",
                              "Survey wave"   = "wave",
-                             "Bread subtype" = "subtype_label",
                              "Sex"           = "sex_label"),
                 selected = "wave", width = "260px"),
 
@@ -174,14 +177,15 @@ server <- function(input, output, session) {
   filtered <- reactive({
     req(input$wave, input$bread_subtype)
 
-    # If user is grouping by Bread subtype we want all 3 subtypes as series,
-    # so we ignore the radio selection in that case. Otherwise we filter to
-    # the single chosen subtype.
-    subtypes_to_keep <- if (input$groupvar == "subtype_label") {
-      c(0L, 1L, 2L)
-    } else {
-      as.integer(input$bread_subtype)
-    }
+    # Subtype is now a checkbox set. Total bread = Wholegrain + Refined, so it
+    # cannot be mixed with the subtypes. Selecting exactly {Wholegrain,
+    # Refined} triggers stacked mode (handled in the plot).
+    subtypes_sel <- as.integer(input$bread_subtype)
+    validate(need(!(0L %in% subtypes_sel && length(subtypes_sel) > 1),
+                  paste("'Total bread' equals Wholegrain + Refined, so view it",
+                        "on its own. Untick Total, or tick Wholegrain and/or",
+                        "Refined.")))
+    subtypes_to_keep <- subtypes_sel
 
     # Wave can only be multi-selected if Group by = Wave; otherwise the
     # display would have ambiguous duplicate rows per X cell.
@@ -242,7 +246,7 @@ server <- function(input, output, session) {
           .groups           = "drop"
         ) %>%
         mutate(
-          lowerCI = mean_g - 1.96 * se_g,
+          lowerCI = pmax(0, mean_g - 1.96 * se_g),
           upperCI = mean_g + 1.96 * se_g
         )
     }
@@ -270,7 +274,12 @@ server <- function(input, output, session) {
     suffix <- c(mean_g = "g", pct_non_consumers = "%", mean_kcal = "kcal",
                 sd_g = "g", n = "")[[input$metric]]
 
-    show_err <- isTRUE(input$show_ci) && input$metric == "mean_g"
+    # Stacked mode = exactly Wholegrain + Refined ticked. Segments stack;
+    # error bars are dropped; the tooltip gains each segment's % of total.
+    stack_mode <- setequal(as.integer(input$bread_subtype), c(1L, 2L))
+    show_err   <- isTRUE(input$show_ci) && input$metric == "mean_g" && !stack_mode
+    pctjs <- if (stack_mode && input$metric == "mean_g")
+      "+' ('+Highcharts.numberFormat(this.percentage,0)+'% of total)'" else ""
 
     grp_sym <- if (input$groupvar == "_none") NULL else sym(input$groupvar)
     x_sym   <- sym(input$xvar)
@@ -319,16 +328,78 @@ server <- function(input, output, session) {
                )) %>%
       hc_yAxis(title = list(text = metric_lbl)) %>%
       hc_title(text = title_text) %>%
-      hc_subtitle(text = "Source: ABS NNPAS (CURF 2011-12; DataLab 2023)") %>%
+      hc_subtitle(text = "Source: ABS 2011-12 NNPAS (Basic CURF), 2023 NNPAS (DataLab)") %>%
       hc_add_theme(hc_theme_economist()) %>%
       hc_colors(abscol) %>%
-      hc_tooltip(crosshairs = TRUE,
-                 valueSuffix = if (nzchar(suffix)) paste0(" ", suffix) else "",
-                 shared = FALSE) %>%
+      hc_tooltip(
+        crosshairs = TRUE,
+        useHTML    = TRUE,
+        shared     = FALSE,
+        formatter  = JS(paste0(
+          "function(){",
+          "var cats=this.series.chart.xAxis[0].categories;",
+          "var cat=this.point.name||(cats&&cats[Math.round(this.x)])||this.x;",
+          "var suf='", if (nzchar(suffix)) paste0(" ", suffix) else "", "';",
+          "var dec=", c(mean_g=1,pct_non_consumers=1,mean_kcal=1,sd_g=1,n=0)[[input$metric]], ";",
+          "var lbl='", c(overall_label="",age_label="Age group",sex_label="Sex",
+                         res_label="Residence",edu_label="Education")[[input$xvar]], "';",
+          "var hdr=lbl?lbl+': '+cat:cat;",
+          "return '<span style=\"font-size:10px\">'+hdr+'</span><br/>'+",
+          "'<span style=\"color:'+this.point.color+'\">\\u25CF</span> '+",
+          "this.series.name+': <b>'+Highcharts.numberFormat(this.y,dec)+suf+'</b>'", pctjs, ";",
+          "}"
+        ))
+      ) %>%
       apply_font_styles()
 
     # Build series
-    if (is.null(grp_sym)) {
+    if (stack_mode) {
+      # Stack Wholegrain + Refined within each column. Segments = subtype
+      # (colour); optional clusters = the Group-by series (wave or sex), so
+      # different groups sit side by side, each split into WG + refined.
+      hc <- hc %>% hc_plotOptions(series = list(stacking = "normal"))
+      seg_labels <- unname(subtype_lbl[c("1", "2")])   # Wholegrain, Refined
+      seg_cols   <- abscol[seq_along(seg_labels)]
+      cluster_field <- if (input$groupvar %in% c("wave", "sex_label"))
+        input$groupvar else NULL
+      clusters <- if (is.null(cluster_field)) "_all" else
+        intersect(levels(droplevels(factor(d[[cluster_field]]))),
+                  unique(as.character(d[[cluster_field]])))
+
+      for (ci in seq_along(clusters)) {
+        cl  <- clusters[[ci]]
+        dcl <- if (is.null(cluster_field)) d else
+          d %>% filter(as.character(.data[[cluster_field]]) == cl)
+        for (k in seq_along(seg_labels)) {
+          sub <- dcl %>% filter(as.character(subtype_label) == seg_labels[[k]])
+          # Align to the full category set so the two segments stack at the
+          # same x even if a category is missing for one subtype.
+          yv <- as.numeric(sub[[input$metric]][
+                   match(cats, as.character(sub[[input$xvar]]))])
+          if (all(is.na(yv))) next
+          # Tag the bottom segment of each cluster with the wave (or sex)
+          # label at the base of the column, since stacking consumes the
+          # legend for the subtypes. Highcharts' default reversedStacks puts
+          # the last-added series at the bottom of the stack.
+          is_bottom <- k == length(seg_labels)
+          dlabs <- if (!is.null(cluster_field) && is_bottom)
+            list(enabled = TRUE, inside = TRUE, verticalAlign = "bottom",
+                 rotation = 270, y = -18, format = cl, crop = FALSE,
+                 overflow = "allow",
+                 style = list(fontSize = "9px", fontWeight = "normal",
+                              color = "#FFFFFF", textOutline = "none"))
+          else list(enabled = FALSE)
+          hc <- hc %>%
+            hc_add_series(name = seg_labels[[k]],
+                          data = list_parse(tibble(name = cats, y = yv)),
+                          stack = if (is.null(cluster_field)) "all" else cl,
+                          color = seg_cols[[k]],
+                          showInLegend = (ci == 1),
+                          dataLabels = dlabs)
+        }
+      }
+
+    } else if (is.null(grp_sym)) {
       vals <- tibble(.cat = as.character(d[[input$xvar]]),
                      y    = as.numeric(d[[input$metric]]),
                      low  = as.numeric(d$lowerCI),
@@ -388,7 +459,7 @@ server <- function(input, output, session) {
 
           ser <- sub %>%
             transmute(x = x, y = y, name = .cat) %>%
-            list_parse2()
+            list_parse()
 
           hc <- hc %>%
             hc_add_series(
@@ -481,7 +552,7 @@ server <- function(input, output, session) {
   })
 }
 
+
 shinyApp(ui, server)
 
 
-shiny::runApp("app.R", launch.browser = TRUE)

@@ -9,7 +9,7 @@
 # ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026):
 #   - Person-level mean intakes are computed across all valid recall days
 #     (Day 1 and, where available, Day 2), with zero-intake days retained.
-#   - Energy-adjusted intake (residual method, log-log, standardized to
+#   - Energy-adjusted intake (residual method, log-log, standardised to
 #     2,000 kcal/day) is the preferred output, alongside unadjusted intake.
 #   - Energy-plausibility screening uses Schofield BMR + Goldberg cutoffs
 #     (EI:BMR < 0.9 or > 2.4). Children <10y and pregnant women are exempt

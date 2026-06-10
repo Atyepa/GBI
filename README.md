@@ -23,7 +23,7 @@ Outputs:
 
 - A long-format CSV matching the GBI Data_Template (`GBI_DataTemplate_NNPAS_<year>.csv`)
 - A filled GBI Excel template (`GBI_AggregateDataForm_NNPAS_<year>.xlsx`)
-- (2023 only) `bread_alone_classification_NNPAS_2023.csv` — the standalone-bread wholegrain/refined lookup table for QC
+- `bread_alone_classification_NNPAS_<year>.csv` — the standalone-bread wholegrain/refined lookup table for QC
 
 ## Data requirements
 
@@ -35,10 +35,10 @@ Place in a `CURF_2011_12/` subdirectory:
 
 | File | Description |
 |---|---|
-| `npa11bf.csv` | Food-level records (~342k rows) |
+| `npa11bf.csv` | Food-level records (~342k rows); must be the updated CURF carrying the `WGBRGM`/`WGSVGM`/`WGMFGM` + `RFBRGM`/`RFSVGM`/`RFMFGM` bread-gram columns and the imputed `PHDCMHBC`/`PHDKGWBC` |
 | `npa11bp.csv` | Person-level records (~12k rows) |
-| `npa11ehh.csv` | Household-level records |
-| `ADG_Database.xlsx` | Australian Dietary Guidelines food composition database |
+
+(The separate `ADG_Database.xlsx` is no longer required — the updated CURF carries the bread-gram fields on the food file.)
 
 ### NNPAS 2023 (DataLab unit-record)
 
@@ -88,9 +88,9 @@ Updated 2026-05 to follow the GBI methodological clarification note (29 April 20
 
 |  | NNPAS 2011-12 | NNPAS 2023 |
 |---|---|---|
-| **Bread "all sources"** | Disaggregated via the ADG Database: g of bread per 100 g of any food × `GRAMWGT`/100, summing ADG columns 1011+1015+1017 (wholegrain) and 1021+1025+1027 (refined), over the all-bread code list. | Sum of food-record-level `WGBRGM`+`WGSVGM`+`WGMFGM` (wholegrain) and `RFBRGM`+`RFSVGM`+`RFMFGM` (refined) — already disaggregated by the ABS — over the all-bread code list. |
-| **Bread code lists** (AUSNUT, per the 2026-05 GBI spec) | **Bread alone**: 12201001–12203017, 12203022–12305006, 12307001–12307004, 13201001, 13201002, 13201010, 13201012, 13203001, 13203002, 13205003. **All bread** adds the mixed-dish codes 13503001–13507004, 13507014–13507036, 13508012. | **Bread alone**: 12201001–12305002, 12305004–12305007, 12306001–12306004, 13201001, 13201002, 13201018, 13201019, 13202001, 13204003. **All bread** adds 13503001–13504001, 13504004–13507004, 13507008–13507012, 13507016–13507019. |
-| **Wholegrain/refined classification** | ADG columns 1011+1015+1017 vs 1021+1025+1027 majority; description-keyword fallback; default refined. | Layered: description keywords → AUSNUT 2023 `WGBRGM`/`RFBRGM` majority → `FIBRE` > 5 g/100 g → default refined. |
+| **Bread "all sources"** | Sum of food-record-level `WGBRGM`+`WGSVGM`+`WGMFGM` (wholegrain) and `RFBRGM`+`RFSVGM`+`RFMFGM` (refined) — carried on the updated CURF food file in grams per record — over the all-bread code list. (No separate ADG_Database lookup.) | Sum of the same food-record-level `WG*GM`/`RF*GM` columns over the all-bread code list — already disaggregated by the ABS. |
+| **Bread code lists** (AUSNUT, per the 2026-05 GBI spec) | **Bread alone**: 12201001–12203017, 12203022–12305006, 12307001–12307004, 13201001/02, 13201010/12, 13203001/02, 13205003 — pruned to the GBI definition (excludes pumpkin bread, johnny cake, French toast as not bread, and cheese/garlic-topped breads 12304001–08 + 12307001/02 as composites kept in all-sources only). **All bread** adds mixed-dish codes 13503001–13507004, 13507014–13507036, 13508012. | **Bread alone**: 12201001–12305002, 12305004–12305007, 12306001–12306004, 13201001/02, 13201018/19, 13202001, 13204003 — pruned to the GBI definition (excludes **pizza base 12201022–24**, pumpkin bread 12201025, French toast 12306004 as not bread, and cheese/garlic-topped breads 12304001–06 + 12306002/03 as composites). **All bread** adds 13503001–13504001, 13504004–13507004, 13507008–13507012, 13507016–13507019. |
+| **Wholegrain/refined classification** | Per-code bread-gram majority from the food file (`WGBRGM`+`WGSVGM`+`WGMFGM` vs `RFBRGM`+`RFSVGM`+`RFMFGM`); zero-gram codes default to refined (two wholemeal/mixed-grain English muffins excepted). | Per-code bread-gram majority from AUSNUT 2023 (same six columns); ties default to refined. |
 | **Sex** | `SEX` | `SEXBIRTH` |
 | **Education** | `HYSCHCBC` + `LVHNSQBC` | `HIGHLVLD` (single combined level) |
 | **Remoteness** | `ARIABC` 1-2 → urban; 3 → rural | `ARIA21SL` 0-1 → urban; 2-4 → rural |

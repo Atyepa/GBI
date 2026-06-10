@@ -17,16 +17,18 @@
 #   - SDs are now the weighted empirical SD of person-level mean intakes
 #     within each stratum (no ANOVA partitioning).
 #   - Both bread-alone and bread-from-all-sources use explicit AUSNUT
-#     code lists per the 2026-05 GBI specification clarification, and the
-#     ADG mixed-food disaggregation now uses ADG columns
-#     1011, 1015, 1017 (wholegrain) and 1021, 1025, 1027 (refined).
+#     code lists per the 2026-05 GBI specification clarification.
+#   - Bread grams and the wholegrain/refined split now come from the
+#     bread-gram fields carried on the updated CURF food file
+#     (WGBRGM/WGSVGM/WGMFGM, RFBRGM/RFSVGM/RFMFGM -- grams per record),
+#     so the separate ADG_Database.xlsx lookup is no longer used. This
+#     matches the 2023 NNPAS mechanism.
 # =============================================================================
 
 library(tidyverse)
-library(readxl)
 library(survey)
 library(srvyr)
-library(openxlsx)
+library(openxlsx)   # template fill only; ADG_Database.xlsx no longer read
 
 # --- Paths ----------------------------------------------------------------
 curf_dir <- "CURF_2011-12"  # update if CURF files live elsewhere
@@ -63,93 +65,61 @@ if (REPORT) {
 }
 
 # =============================================================================
-# SECTION 1: AUSNUT food-code lists and ADG reference data
+# SECTION 1: AUSNUT food-code lists
 # =============================================================================
+# The updated 2011-12 Basic CURF carries the AUSNUT/ADG bread-gram fields on
+# the food file itself (WGBRGM/WGSVGM/WGMFGM, RFBRGM/RFSVGM/RFMFGM -- already
+# in grams per food record, like the 2023 NNPAS), so the separate
+# ADG_Database.xlsx lookup and its g/100g recode are no longer required.
 
-# --- 1a. AUSNUT 2011-13 code lists (per 2026-05 GBI spec clarification) -----
-# "Bread alone" -- standalone bread products
-bread_alone_codes_2011_12 <- c(
+# --- 1a. AUSNUT 2011-13 code lists ------------------------------------------
+# Bread-product code ranges per the 2026-05 GBI spec clarification, then
+# pruned to the GBI "bread alone" / "bread all sources" definitions
+# (GBI_Aggregate_Data_Form.xlsx) after reviewing food descriptions.
+bread_product_codes <- c(
   12201001:12203017, 12203022:12305006, 12307001:12307004,
   13201001, 13201002, 13201010, 13201012,
   13203001, 13203002, 13205003
 )
 
-# "All bread" -- bread alone PLUS mixed-dish codes whose bread component
-# is captured by ADG disaggregation (sandwiches, burgers, pizza, etc.).
+# Items the GBI definition excludes as NOT bread (quick/sweet breads and
+# French toast) -- dropped from every measure. ABS already assigns most of
+# these zero bread-grams, so "all sources" is barely affected.
+not_bread_codes <- c(
+  12203022, 12203023,   # pumpkin bread (quick bread)
+  12203027,             # johnny cake (cornmeal quick bread)
+  12307003, 12307004    # French toast
+)
+
+# Composite / topped / savoury-prepared breads -- carriers or prepared dishes
+# rather than standalone bread: excluded from "bread alone", but their bread
+# component is still counted under "bread all sources".
+composite_bread_codes <- c(
+  12304001:12304008,    # bread topped/mixed (cheese, bacon, meat, olives, etc.)
+  12307001, 12307002    # garlic / herb bread
+)
+
+# "Bread alone" = bread products minus non-bread items minus composites.
+bread_alone_codes_2011_12 <- setdiff(
+  bread_product_codes, c(not_bread_codes, composite_bread_codes))
+
+# "All bread" = bread products (keeping composites, dropping non-bread items)
+# plus the mixed-dish bread codes (sandwiches, burgers, etc.).
 all_bread_codes_2011_12 <- c(
-  bread_alone_codes_2011_12,
+  setdiff(bread_product_codes, not_bread_codes),
   13503001:13507004, 13507014:13507036, 13508012
 )
 
-# --- 1b. ADG Database (food composition / disaggregation) -------------------
-adg <- read_excel(file.path(curf_dir, "ADG_Database.xlsx"))
-
-# The ADG database has both "g/100g" and "Serves/100g" rows per food.
-# We need only the gram weights.
-adg <- adg %>% filter(Unit == "g/100g")
-
-cat("ADG filtered to g/100g:", nrow(adg), "rows,",
-    n_distinct(adg$FOODCODC), "unique FOODCODCs\n")
-
-# Rename ADG bread columns:
-#   1011 WG/HF Bread (regular varieties)
-#   1015 WG/HF Savoury crackers/crispbreads
-#   1017 WG/HF English muffins and scones
-#   1021 Ref/LF Bread (regular varieties)
-#   1025 Ref/LF Savoury crackers/crispbreads
-#   1027 Ref/LF English muffins and scones
-adg <- adg %>%
-  rename(
-    adg_wg_br  = `1011`,
-    adg_wg_sv  = `1015`,
-    adg_wg_mf  = `1017`,
-    adg_ref_br = `1021`,
-    adg_ref_sv = `1025`,
-    adg_ref_mf = `1027`
-  ) %>%
-  mutate(
-    across(c(adg_wg_br, adg_wg_sv, adg_wg_mf,
-             adg_ref_br, adg_ref_sv, adg_ref_mf),
-           ~ replace_na(as.numeric(.x), 0)),
-    adg_wg_total  = adg_wg_br  + adg_wg_sv  + adg_wg_mf,
-    adg_ref_total = adg_ref_br + adg_ref_sv + adg_ref_mf
-  )
-
-# --- 1c. Bread-alone wholegrain/refined classification ----------------------
-# For each bread-alone food code, classify by ADG totals; fall back to
-# description keywords; default to refined.
-wg_keywords <- c("wholemeal", "wholegrain", "whole grain", "mixed grain",
-                 "multigrain", "multi-grain", "\\brye\\b", "spelt",
-                 "pumpernickel", "added fibre", "high fibre",
-                 "chapatti", "injera", "roti")
-
-bread_alone_classify <- adg %>%
-  filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
-  select(FOODCODC, Description, adg_wg_total, adg_ref_total) %>%
-  mutate(
-    desc_lower = str_to_lower(Description),
-    desc_wg    = str_detect(desc_lower, str_c(wg_keywords, collapse = "|")),
-    bread_class = case_when(
-      adg_wg_total  > adg_ref_total  ~ "wholegrain",
-      adg_ref_total > adg_wg_total   ~ "refined",
-      desc_wg                        ~ "wholegrain",
-      TRUE                           ~ "refined"
-    )
-  ) %>%
-  select(FOODCODC, Description, bread_class)
-
-cat("Bread alone codes (", length(bread_alone_codes_2011_12), "in list):",
-    nrow(bread_alone_classify), "classified\n")
-count(bread_alone_classify, bread_class) %>% print()
-
-write_csv(bread_alone_classify, "bread_alone_classification_NNPAS_2011_12.csv")
-
-# --- 1d. ADG bread content lookup for "bread all sources" -------------------
-adg_bread_content <- adg %>%
-  filter(adg_wg_total > 0 | adg_ref_total > 0) %>%
-  select(FOODCODC, adg_wg_total, adg_ref_total)
-
-cat("\nFoods with any bread content in ADG:", nrow(adg_bread_content), "\n")
+# --- 1b. Wholegrain tie-breaker for zero-content bread-alone codes ----------
+# Wholegrain vs refined is decided per food record from the bread-gram columns
+# on the food file (WG sum vs refined sum; see Sections 2b and 4). A handful of
+# bread-alone codes carry no bread-gram content at all (pumpkin bread,
+# dried-fruit bread, two English muffins) and so tie at 0 = 0; these default to
+# refined, except the two that are wholemeal / mixed-grain by name:
+wholegrain_tiebreak_codes <- c(
+  12301004,   # Muffin, English style, from wholemeal flour
+  12301005    # Muffin, English style, mixed grain
+)
 
 # =============================================================================
 # SECTION 2: Load CURF data files
@@ -158,7 +128,7 @@ cat("\nFoods with any bread content in ADG:", nrow(adg_bread_content), "\n")
 # --- 2a. Person file --------------------------------------------------------
 # Variables loaded (DIL names; verify in your CURF release):
 #   ABSHID, ABSPID  ............ identifiers
-#   AGE, SEX  .................. demographics
+#   AGEC, SEX  .................. demographics
 #   PHDCMHBC, PHDKGWBC  ........ measured height (cm), weight (kg);
 #                                 imputed values overwrite 997/998 codes
 #   PREGNANT  .................. pregnancy flag (1 = pregnant) -- TODO:
@@ -175,7 +145,7 @@ persons <- read_csv(file.path(curf_dir, "npa11bp.csv"),
 persons <- persons %>%
   select(
     ABSHID, ABSPID,
-    AGE, SEX,
+    AGEC, SEX,
     any_of(c("PHDCMHBC", "PHDKGWBC", "PREGNANT")),
     NPAFINWT, NPAD2WGT, NUMRECAL,
     ARIABC, HYSCHCBC, LVHNSQBC,
@@ -193,23 +163,54 @@ if (!"PREGNANT" %in% names(persons)) persons$PREGNANT <- NA_integer_
 cat("\nPersons loaded:", nrow(persons), "\n")
 
 # --- 2b. Food file ----------------------------------------------------------
+# The updated CURF carries the bread-gram fields per food record (grams of
+# wholegrain / refined bread per record, already AUSNUT g/100g x GRAMWGT/100):
+#   WGBRGM / WGSVGM / WGMFGM  -- wholegrain bread / savoury crackers / muffins
+#   RFBRGM / RFSVGM / RFMFGM  -- refined   bread / savoury crackers / muffins
 foods <- read_csv(file.path(curf_dir, "npa11bf.csv"),
                   show_col_types = FALSE) %>%
-  select(ABSPID, DAYNUM, FOODCODC, GRAMWGT)
+  select(ABSPID, DAYNUM, FOODCODC, GRAMWGT,
+         WGBRGM, WGSVGM, WGMFGM, RFBRGM, RFSVGM, RFMFGM) %>%
+  mutate(
+    wg_g  = coalesce(WGBRGM, 0) + coalesce(WGSVGM, 0) + coalesce(WGMFGM, 0),
+    ref_g = coalesce(RFBRGM, 0) + coalesce(RFSVGM, 0) + coalesce(RFMFGM, 0)
+  )
 
 cat("Food records loaded:", nrow(foods), "\n")
 cat("  Day 1 records:", sum(foods$DAYNUM == 1), "\n")
 cat("  Day 2 records:", sum(foods$DAYNUM == 2), "\n")
+
+# --- 2c. Bread-alone wholegrain/refined classification (per code) -----------
+# Classify each bread-alone code by its bread-gram majority (constant per code,
+# since wg_g/ref_g scale with GRAMWGT); zero-content codes default to refined
+# unless wholegrain by name (see wholegrain_tiebreak_codes).
+bread_alone_classify <- foods %>%
+  filter(FOODCODC %in% bread_alone_codes_2011_12) %>%
+  group_by(FOODCODC) %>%
+  summarise(wg_sum = sum(wg_g), rf_sum = sum(ref_g), .groups = "drop") %>%
+  mutate(
+    bread_class = case_when(
+      wg_sum > rf_sum                          ~ "wholegrain",
+      rf_sum > wg_sum                          ~ "refined",
+      FOODCODC %in% wholegrain_tiebreak_codes  ~ "wholegrain",
+      TRUE                                     ~ "refined"
+    )
+  ) %>%
+  select(FOODCODC, bread_class)
+
+cat("\nBread-alone codes consumed & classified:", nrow(bread_alone_classify), "\n")
+count(bread_alone_classify, bread_class) %>% print()
+write_csv(bread_alone_classify, "bread_alone_classification_NNPAS_2011_12.csv")
 
 # =============================================================================
 # SECTION 3: Stratification and person-level prep
 # =============================================================================
 
 # --- 3a. Exclude any participants aged <2 years (GBI age eligibility) -------
-n_under2 <- sum(persons$AGE < 2, na.rm = TRUE)
+n_under2 <- sum(persons$AGEC < 2, na.rm = TRUE)
 if (n_under2 > 0) {
   cat("\nExcluding", n_under2, "participants aged <2 years (GBI eligibility).\n")
-  persons <- persons %>% filter(AGE >= 2)
+  persons <- persons %>% filter(AGEC >= 2)
 }
 
 # --- 3b. Age groups (GBI bands 1-12) ----------------------------------------
@@ -218,7 +219,7 @@ age_labels <- 1:12   # 1 = 2-5y, 2 = 6-10y, ..., 12 = 85+
 
 persons <- persons %>%
   mutate(
-    age_grp = cut(AGE, breaks = age_breaks, labels = age_labels,
+    age_grp = cut(AGEC, breaks = age_breaks, labels = age_labels,
                   right = FALSE, include.lowest = TRUE) %>% as.integer()
   )
 
@@ -233,7 +234,7 @@ persons %>% count(age_grp) %>% print()
 persons <- persons %>%
   mutate(
     edu_level_own = case_when(
-      AGE < 15            ~ NA_integer_,
+      AGEC < 15            ~ NA_integer_,
       LVHNSQBC %in% 1:4   ~ 3L,
       HYSCHCBC %in% 1:3   ~ 2L,
       HYSCHCBC %in% 4:5   ~ 1L,
@@ -242,13 +243,13 @@ persons <- persons %>%
   )
 
 adult_edu <- persons %>%
-  filter(AGE >= 15, !is.na(edu_level_own)) %>%
+  filter(AGEC >= 15, !is.na(edu_level_own)) %>%
   group_by(ABSHID) %>%
   summarise(hh_adult_edu = max(edu_level_own), .groups = "drop")
 
 persons <- persons %>%
   left_join(adult_edu, by = "ABSHID") %>%
-  mutate(edu_level = if_else(AGE < 15, hh_adult_edu, edu_level_own))
+  mutate(edu_level = if_else(AGEC < 15, hh_adult_edu, edu_level_own))
 
 n_edu_na <- sum(is.na(persons$edu_level))
 if (n_edu_na > 0) {
@@ -326,16 +327,13 @@ bread_alone_pd <- recall_days_long %>%
   mutate(across(c(ba_total_g_d, ba_wg_g_d, ba_ref_g_d),
                 ~ replace_na(.x, 0)))
 
-# --- 4c. Bread all sources per (person, day) (ADG disaggregation) -----------
+# --- 4c. Bread all sources per (person, day) --------------------------------
+# Bread grams are read straight from the food-file bread-gram columns
+# (wg_g / ref_g, computed in Section 2b), summed over the all-bread code list.
 bread_allsrc_pd <- recall_days_long %>%
   left_join(
     foods %>%
       filter(FOODCODC %in% all_bread_codes_2011_12) %>%
-      inner_join(adg_bread_content, by = "FOODCODC") %>%
-      mutate(
-        wg_g  = GRAMWGT * adg_wg_total  / 100,
-        ref_g = GRAMWGT * adg_ref_total / 100
-      ) %>%
       group_by(ABSPID, DAYNUM) %>%
       summarise(
         bas_wg_g_d    = sum(wg_g,  na.rm = TRUE),
@@ -429,12 +427,12 @@ schofield_bmr_mj <- function(weight_kg, age, sex) {
 
 persons <- persons %>%
   mutate(
-    bmr_kcal = schofield_bmr_mj(PHDKGWBC, AGE, sex) * 239.006,
+    bmr_kcal = schofield_bmr_mj(PHDKGWBC, AGEC, sex) * 239.006,
     ei_bmr_ratio = if_else(!is.na(bmr_kcal) & bmr_kcal > 0,
                            mean_energy_kcal / bmr_kcal, NA_real_),
     pregnant_flag = !is.na(PREGNANT) & PREGNANT == 1,
     energy_implausible = case_when(
-      AGE < 10                                ~ FALSE,
+      AGEC < 10                                ~ FALSE,
       pregnant_flag                           ~ FALSE,
       is.na(ei_bmr_ratio)                     ~ FALSE,  # can't screen -> retain
       ei_bmr_ratio < 0.9 | ei_bmr_ratio > 2.4 ~ TRUE,
@@ -449,8 +447,8 @@ cat("  BMR not calculable:        ", n_bmr_miss, "(retained for unadjusted)\n")
 cat("  Flagged implausible:       ", n_impl,
     sprintf("(%.1f%% of those screened)\n",
             100 * n_impl / max(1, sum(!is.na(persons$energy_implausible)))))
-cat("  Exempt (preg or AGE<10):   ",
-    sum((persons$AGE < 10) | persons$pregnant_flag), "\n")
+cat("  Exempt (preg or AGEC<10):   ",
+    sum((persons$AGEC < 10) | persons$pregnant_flag), "\n")
 
 # =============================================================================
 # SECTION 6: Energy adjustment (residual method, log-log, pooled per outcome)
@@ -697,14 +695,19 @@ results_ea <- map_dfr(ea_subtype_map, function(info) {
 # SECTION 9: Assemble final output
 # =============================================================================
 ba_notes <- paste(
-  "Bread alone = explicit AUSNUT 2011-13 code list:",
-  "12201001-12203017, 12203022-12305006, 12307001-12307004,",
-  "13201001, 13201002, 13201010, 13201012,",
-  "13203001, 13203002, 13205003.",
-  "Bread all sources = bread-alone list plus mixed-dish codes",
-  "(13503001-13507004, 13507014-13507036, 13508012),",
-  "with bread g disaggregated via ADG columns 1011/1015/1017 (wholegrain)",
-  "and 1021/1025/1027 (refined).",
+  "Bread alone = AUSNUT 2011-13 bread-product codes",
+  "(12201001-12203017, 12203022-12305006, 12307001-12307004, 13201001-2,",
+  "13201010/12, 13203001-2, 13205003), pruned to the GBI bread-alone",
+  "definition: excludes pumpkin bread, johnny cake and French toast (not",
+  "bread), and topped/savoury breads -- cheese/meat/olive-topped",
+  "12304001-12304008 and garlic/herb bread 12307001-2 -- which are carriers",
+  "counted under all sources only.",
+  "Bread all sources = bread products (excluding the non-bread items) plus",
+  "mixed-dish codes (13503001-13507004, 13507014-13507036, 13508012).",
+  "Bread g read from the food-file bread-gram columns:",
+  "wholegrain = WGBRGM+WGSVGM+WGMFGM, refined = RFBRGM+RFSVGM+RFMFGM",
+  "(grams per record). Bread-alone wholegrain/refined split by the",
+  "per-code bread-gram majority.",
   "Person-level mean intake averaged across all valid recall days,",
   "with 0-intake days retained.",
   "Energy adjustment: residual method, log(bread) ~ log(energy),",
@@ -890,22 +893,23 @@ survey_info <- list(
   c(14, paste("ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey,",
               "Nutrition and Physical Activity, 2011-12, Basic CURF",
               "(with measured height/weight imputed for missing values)")),
-  c(15, "AUSNUT 2011-13 (ABS/FSANZ); ADG Database used for mixed-dish disaggregation"),
+  c(15, paste("AUSNUT 2011-13 (ABS/FSANZ). Bread-gram fields carried on the",
+              "updated Basic CURF food file (no separate ADG lookup needed).")),
   c(16, paste("Bread alone: explicit AUSNUT 2011-13 code list per GBI",
               "2026-05 specification clarification",
               "(12201001-12203017, 12203022-12305006, 12307001-12307004,",
               "13201001, 13201002, 13201010, 13201012,",
               "13203001, 13203002, 13205003).",
-              "Wholegrain vs refined classified by ADG columns",
-              "1011/1015/1017 vs 1021/1025/1027 majority,",
-              "with keyword fallback (wholemeal/wholegrain/multigrain/",
-              "mixed grain/rye/spelt/pumpernickel/added fibre/high fibre/",
-              "chapatti/injera/roti) and refined default.")),
+              "Wholegrain vs refined classified by the food-file bread-gram",
+              "majority per code (WGBRGM+WGSVGM+WGMFGM vs",
+              "RFBRGM+RFSVGM+RFMFGM); the few codes with no bread-gram",
+              "content default to refined, except two English muffins that",
+              "are wholemeal/mixed-grain by name.")),
   c(17, paste("Bread all sources: bread-alone codes plus mixed-dish codes",
               "13503001-13507004, 13507014-13507036, 13508012.",
-              "Bread g extracted from each food via ADG g/100g lookup,",
-              "using columns 1011 + 1015 + 1017 (wholegrain) and",
-              "1021 + 1025 + 1027 (refined) summed over each food record.")),
+              "Bread g read from the food-file bread-gram columns",
+              "WGBRGM+WGSVGM+WGMFGM (wholegrain) and",
+              "RFBRGM+RFSVGM+RFMFGM (refined), already in grams per record.")),
   c(18, paste("Residual method on the log scale (per GBI 2026-04 note):",
               "fit log(bread) ~ log(energy_kcal) once per bread outcome",
               "across all consumers (unweighted; pooled across strata);",
@@ -943,9 +947,10 @@ codebook_availability <- rep("Yes", 17)
 codebook_comments <- c(
   NA, NA, NA,
   "Both bread alone (1) and bread all sources (2) provided per GBI 2026-05 code lists.",
-  paste("Wholegrain/refined classification based on ADG Database columns",
-        "1011+1015+1017 (WG) vs 1021+1025+1027 (Refined),",
-        "with keyword fallback and refined default."),
+  paste("Wholegrain/refined classified by the food-file bread-gram majority",
+        "per code (WGBRGM+WGSVGM+WGMFGM vs RFBRGM+RFSVGM+RFMFGM);",
+        "zero-content codes default to refined (two wholemeal/mixed-grain",
+        "English muffins excepted)."),
   paste("Both unadjusted (1) and energy-adjusted (2) estimates provided.",
         "Energy adjustment is the residual method (log-log) standardised",
         "to 2,000 kcal/day, fitted unweighted on consumers only."),

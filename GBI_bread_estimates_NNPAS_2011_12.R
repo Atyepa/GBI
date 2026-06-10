@@ -9,26 +9,25 @@
 # ("GBI_Methodological_Note_Energy_Adjustment.pdf", 29 April 2026):
 #   - Person-level mean intakes are computed across all valid recall days
 #     (Day 1 and, where available, Day 2), with zero-intake days retained.
-#   - Energy-adjusted intake (residual method, log-log, standardized to
+#   - Energy-adjusted intake (residual method, log-log, standardised to
 #     2,000 kcal/day) is the preferred output, alongside unadjusted intake.
 #   - Energy-plausibility screening uses Schofield BMR + Goldberg cutoffs
 #     (EI:BMR < 0.9 or > 2.4). Children <10y and pregnant women are exempt
 #     from this filter and are always retained.
-#   - SDs are now the weighted empirical SD of person-level mean intakes
+#   - SDs are the weighted empirical SD of person-level mean intakes
 #     within each stratum (no ANOVA partitioning).
 #   - Both bread-alone and bread-from-all-sources use explicit AUSNUT
 #     code lists per the 2026-05 GBI specification clarification.
 #   - Bread grams and the wholegrain/refined split now come from the
-#     bread-gram fields carried on the updated CURF food file
+#     bread-gram fields carried on the 2011-12 Basic CURF food file
 #     (WGBRGM/WGSVGM/WGMFGM, RFBRGM/RFSVGM/RFMFGM -- grams per record),
-#     so the separate ADG_Database.xlsx lookup is no longer used. This
-#     matches the 2023 NNPAS mechanism.
+#     This matches the 2023 NNPAS mechanism.
 # =============================================================================
 
 library(tidyverse)
 library(survey)
 library(srvyr)
-library(openxlsx)   # template fill only; ADG_Database.xlsx no longer read
+library(openxlsx)   # template fill only; 
 
 # --- Paths ----------------------------------------------------------------
 curf_dir <- "CURF_2011-12"  # update if CURF files live elsewhere

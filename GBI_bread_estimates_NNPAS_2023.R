@@ -71,55 +71,69 @@ if (REPORT) {
 # SECTION 1: AUSNUT 2023 food-code lists and bread-alone classification
 # =============================================================================
 
-# --- 1a. AUSNUT 2023 code lists (per 2026-05 GBI spec clarification) --------
-bread_alone_codes_2023 <- c(
+# --- 1a. AUSNUT 2023 code lists ---------------------------------------------
+# Bread-product code ranges per the 2026-05 GBI spec clarification, then
+# pruned to the GBI "bread alone" / "bread all sources" definitions
+# (GBI_Aggregate_Data_Form.xlsx) after reviewing AUSNUT 2023 descriptions.
+bread_product_codes <- c(
   12201001:12305002, 12305004:12305007, 12306001:12306004,
   13201001:13201002, 13201018:13201019,
   13202001, 13204003
 )
 
+# Items the GBI definition excludes as NOT bread -- dropped from EVERY measure
+# (incl. all sources, so e.g. pizza-base bread-grams do not leak in):
+not_bread_codes <- c(
+  12201022, 12201023, 12201024,  # pizza base (commercial / homemade / fast-food)
+  12201025,                      # pumpkin bread (quick bread)
+  12306004                       # French toast
+)
+
+# Composite / topped / savoury-prepared breads -- carriers rather than
+# standalone bread: excluded from "bread alone", but their bread component is
+# still counted under "bread all sources".
+composite_bread_codes <- c(
+  12304001:12304006,   # bread topped/mixed (cheese, bacon, vegemite, olives, etc.)
+  12306002, 12306003   # garlic / herb bread
+)
+
+# "Bread alone" = bread products minus non-bread items minus composites.
+bread_alone_codes_2023 <- setdiff(
+  bread_product_codes, c(not_bread_codes, composite_bread_codes))
+
+# "All bread" = bread products (keeping composites, dropping non-bread items)
+# plus the mixed-dish bread codes (sandwiches, burgers, etc.).
 all_bread_codes_2023 <- c(
-  bread_alone_codes_2023,
+  setdiff(bread_product_codes, not_bread_codes),
   13503001:13504001, 13504004:13507004,
   13507008:13507012, 13507016:13507019
 )
 
 # --- 1b. Bread-alone wholegrain/refined classification ----------------------
-# Layered classification:
-#   Rule A: description keyword match -> wholegrain.
-#   Rule B: AUSNUT 2023 WGBRGM vs RFBRGM majority.
-#   Rule C: FIBRE > 5 g/100 g -> wholegrain.
-#   Default: refined.
+# Classify each bread-alone code by its AUSNUT 2023 per-code bread-gram
+# majority: wholegrain if WGBRGM+WGSVGM+WGMFGM > RFBRGM+RFSVGM+RFMFGM, else
+# refined. (The single zero-content code, a gluten-free English muffin,
+# correctly defaults to refined.)
 ausnut <- read_excel(ausnut_path, sheet = 1)
 
-bread_alone_codes <- ausnut %>%
+bread_alone_classify <- ausnut %>%
   filter(FOODCODL %in% bread_alone_codes_2023) %>%
-  select(FOODCODL, Food_name, FIBRE, WGBRGM, RFBRGM)
-
-wg_keywords <- c("wholemeal", "wholegrain", "whole grain", "mixed grain",
-                 "multigrain", "multi-grain", "\\brye\\b", "spelt",
-                 "pumpernickel", "added fibre", "high fibre",
-                 "chapatti", "injera", "roti")
-
-bread_alone_codes <- bread_alone_codes %>%
   mutate(
-    desc_lower = str_to_lower(Food_name),
-    desc_wg    = str_detect(desc_lower, str_c(wg_keywords, collapse = "|")),
+    wg_sum = coalesce(WGBRGM, 0) + coalesce(WGSVGM, 0) + coalesce(WGMFGM, 0),
+    rf_sum = coalesce(RFBRGM, 0) + coalesce(RFSVGM, 0) + coalesce(RFMFGM, 0),
     bread_class = case_when(
-      desc_wg                                    ~ "wholegrain",
-      WGBRGM > RFBRGM                            ~ "wholegrain",
-      RFBRGM > WGBRGM                            ~ "refined",
-      FIBRE > 5                                  ~ "wholegrain",
-      TRUE                                       ~ "refined"
+      wg_sum > rf_sum ~ "wholegrain",
+      rf_sum > wg_sum ~ "refined",
+      TRUE            ~ "refined"
     )
   ) %>%
-  select(FOODCODL, Food_name, FIBRE, WGBRGM, RFBRGM, bread_class)
+  select(FOODCODL, bread_class)
 
-cat("Standalone bread codes in AUSNUT 2023 list:", nrow(bread_alone_codes), "\n")
+cat("Standalone bread codes classified:", nrow(bread_alone_classify), "\n")
 cat("Classification breakdown:\n")
-count(bread_alone_codes, bread_class) %>% print()
+count(bread_alone_classify, bread_class) %>% print()
 
-write_csv(bread_alone_codes, "bread_alone_classification_NNPAS_2023.csv")
+write_csv(bread_alone_classify, "bread_alone_classification_NNPAS_2023.csv")
 
 # =============================================================================
 # SECTION 2: Load NNPAS 2023 unit-record files
@@ -315,8 +329,7 @@ bread_alone_pd <- recall_days_long %>%
   left_join(
     foods %>%
       filter(FOODCODL %in% bread_alone_codes_2023) %>%
-      inner_join(bread_alone_codes %>% select(FOODCODL, bread_class),
-                 by = "FOODCODL") %>%
+      inner_join(bread_alone_classify, by = "FOODCODL") %>%
       group_by(person_uid, DAYNUM) %>%
       summarise(
         ba_total_g_d = sum(GRAMWGT, na.rm = TRUE),
@@ -672,14 +685,20 @@ results_ea <- map_dfr(ea_subtype_map, function(info) {
 # SECTION 9: Assemble final output
 # =============================================================================
 ba_notes <- paste(
-  "Bread alone = explicit AUSNUT 2023 code list:",
-  "12201001-12305002, 12305004-12305007, 12306001-12306004,",
-  "13201001, 13201002, 13201018, 13201019, 13202001, 13204003.",
-  "Bread all sources = bread-alone list plus mixed-dish codes",
-  "(13503001-13504001, 13504004-13507004, 13507008-13507012,",
-  "13507016-13507019). Bread g per food record summed across",
-  "WGBRGM+WGSVGM+WGMFGM (wholegrain) and RFBRGM+RFSVGM+RFMFGM (refined),",
-  "all already in grams per the AUSNUT 2023 disaggregation.",
+  "Bread alone = AUSNUT 2023 bread-product codes",
+  "(12201001-12305002, 12305004-12305007, 12306001-12306004, 13201001-2,",
+  "13201018-19, 13202001, 13204003), pruned to the GBI bread-alone",
+  "definition: excludes pizza base (12201022-24), pumpkin bread (12201025)",
+  "and French toast (12306004) as not bread, and topped/savoury breads",
+  "(cheese/olive-topped 12304001-12304006 and garlic/herb bread 12306002-3)",
+  "as composite carriers counted under all sources only.",
+  "Bread all sources = bread products (excl. the non-bread items, so no",
+  "pizza-base grams) plus mixed-dish codes (13503001-13504001,",
+  "13504004-13507004, 13507008-13507012, 13507016-13507019). Bread g per",
+  "food record summed across WGBRGM+WGSVGM+WGMFGM (wholegrain) and",
+  "RFBRGM+RFSVGM+RFMFGM (refined), already in grams per the AUSNUT 2023",
+  "disaggregation. Bread-alone wholegrain/refined split by the AUSNUT",
+  "per-code bread-gram majority.",
   "Person-level mean intake averaged across all valid recall days,",
   "with 0-intake days retained.",
   "Energy adjustment: residual method, log(bread) ~ log(energy),",
@@ -863,16 +882,19 @@ survey_info <- list(
               "measured height/weight imputed (hot-deck) by ABS so BMR is",
               "calculable for almost all records")),
   c(15, "AUSNUT 2023 (ABS/FSANZ)"),
-  c(16, paste("Bread alone: explicit AUSNUT 2023 code list per GBI",
-              "2026-05 specification clarification",
-              "(12201001-12305002, 12305004-12305007, 12306001-12306004,",
-              "13201001, 13201002, 13201018, 13201019, 13202001, 13204003).",
-              "Wholegrain vs refined classified by description keyword",
-              "(wholemeal/wholegrain/multigrain/mixed grain/rye/spelt/",
-              "pumpernickel/added fibre/high fibre/chapatti/injera/roti)",
-              "-> wholegrain; else AUSNUT WGBRGM vs RFBRGM majority;",
-              "else FIBRE > 5 g/100 g -> wholegrain; default refined.")),
-  c(17, paste("Bread all sources: bread-alone codes plus mixed-dish codes",
+  c(16, paste("Bread alone: AUSNUT 2023 bread-product codes per GBI 2026-05",
+              "spec (12201001-12305002, 12305004-12305007, 12306001-12306004,",
+              "13201001-2, 13201018-19, 13202001, 13204003), pruned to the GBI",
+              "bread-alone definition: excludes pizza base (12201022-24),",
+              "pumpkin bread (12201025) and French toast (12306004) as not",
+              "bread, and topped/savoury breads (cheese/olive-topped",
+              "12304001-12304006 and garlic/herb bread 12306002-3) as composite",
+              "carriers (counted under all sources only).",
+              "Wholegrain vs refined classified by the AUSNUT 2023 per-code",
+              "bread-gram majority (WGBRGM+WGSVGM+WGMFGM vs",
+              "RFBRGM+RFSVGM+RFMFGM); ties default to refined.")),
+  c(17, paste("Bread all sources: bread products (excluding the non-bread",
+              "items, so no pizza-base grams) plus mixed-dish codes",
               "13503001-13504001, 13504004-13507004, 13507008-13507012,",
               "13507016-13507019.",
               "For each food record, bread g summed from WGBRGM+WGSVGM+WGMFGM",
@@ -918,9 +940,9 @@ codebook_availability <- rep("Yes", 17)
 codebook_comments <- c(
   NA, NA, NA,
   "Both bread alone (1) and bread all sources (2) provided per GBI 2026-05 code lists.",
-  paste("Wholegrain/refined classification of bread-alone items:",
-        "description keyword -> WGBRGM/RFBRGM majority -> FIBRE > 5 g/100 g;",
-        "default refined."),
+  paste("Wholegrain/refined classified by the AUSNUT 2023 per-code bread-gram",
+        "majority (WGBRGM+WGSVGM+WGMFGM vs RFBRGM+RFSVGM+RFMFGM); ties default",
+        "to refined."),
   paste("Both unadjusted (1) and energy-adjusted (2) estimates provided.",
         "Energy adjustment is the residual method (log-log) standardised",
         "to 2,000 kcal/day, fitted unweighted on consumers only."),

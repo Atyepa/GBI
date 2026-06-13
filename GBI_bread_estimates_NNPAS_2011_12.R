@@ -76,34 +76,28 @@ if (REPORT) {
 # pruned to the GBI "bread alone" / "bread all sources" definitions
 # (GBI_Aggregate_Data_Form.xlsx) after reviewing food descriptions.
 bread_product_codes <- c(
-  12201001:12203017, 12203022:12305006, 12307001:12307004,
-  13201001, 13201002, 13201010, 13201012,
-  13203001, 13203002, 13205003
+  12201001:12307004,                                # Breads
+  13201001, 13201002,                               # Crispbreads
+  13201010, 13201012, 13203001, 13203002, 13205003  # Crispbreads
 )
 
 # Items the GBI definition excludes as NOT bread (quick/sweet breads and
 # French toast) -- dropped from every measure. ABS already assigns most of
-# these zero bread-grams, so "all sources" is barely affected.
+# these zero bread-grams, so "all sources" is barely affected. Focaccia and
+# topped breads (olive/cheese-topped, garlic/herb) ARE bread and are kept.
 not_bread_codes <- c(
-  12203022, 12203023,   # pumpkin bread (quick bread)
-  12203027,             # johnny cake (cornmeal quick bread)
-  12307003, 12307004    # French toast
+  12201003:12201006,   # Breadcrumbs, croutons, damper
+  12203018:12203024,   # Pizza base, pumpkin bread, damper
+  12203027, 12214001,  # johnny cake, corn bread
+  12305007:12307000,   # Sweet breads (garlic/herb 12307001-2 kept as bread)
+  12307003, 12307004   # French toast
 )
 
-# Composite / topped / savoury-prepared breads -- carriers or prepared dishes
-# rather than standalone bread: excluded from "bread alone", but their bread
-# component is still counted under "bread all sources".
-composite_bread_codes <- c(
-  12304001:12304008,    # bread topped/mixed (cheese, bacon, meat, olives, etc.)
-  12307001, 12307002    # garlic / herb bread
-)
+# "Bread alone" = bread products minus non-bread items.
+bread_alone_codes_2011_12 <- setdiff(bread_product_codes, not_bread_codes)
 
-# "Bread alone" = bread products minus non-bread items minus composites.
-bread_alone_codes_2011_12 <- setdiff(
-  bread_product_codes, c(not_bread_codes, composite_bread_codes))
-
-# "All bread" = bread products (keeping composites, dropping non-bread items)
-# plus the mixed-dish bread codes (sandwiches, burgers, etc.).
+# "All bread" = bread products (dropping non-bread items) plus the mixed-dish
+# bread codes (sandwiches, burgers, etc.).
 all_bread_codes_2011_12 <- c(
   setdiff(bread_product_codes, not_bread_codes),
   13503001:13507004, 13507014:13507036, 13508012
@@ -694,13 +688,12 @@ results_ea <- map_dfr(ea_subtype_map, function(info) {
 # SECTION 9: Assemble final output
 # =============================================================================
 ba_notes <- paste(
-  "Bread alone = AUSNUT 2011-13 bread-product codes",
-  "(12201001-12203017, 12203022-12305006, 12307001-12307004, 13201001-2,",
-  "13201010/12, 13203001-2, 13205003), pruned to the GBI bread-alone",
-  "definition: excludes pumpkin bread, johnny cake and French toast (not",
-  "bread), and topped/savoury breads -- cheese/meat/olive-topped",
-  "12304001-12304008 and garlic/herb bread 12307001-2 -- which are carriers",
-  "counted under all sources only.",
+  "Bread alone = AUSNUT 2011-13 bread-product codes (12201001-12307004 plus",
+  "crispbreads 13201001-2, 13201010/12, 13203001-2, 13205003), pruned to the",
+  "GBI bread-alone definition: excludes breadcrumbs/croutons, pizza base,",
+  "pumpkin bread, johnny cake, corn bread, sweet breads and French toast as",
+  "not bread. Focaccia and topped breads (olive/cheese-topped, garlic/herb)",
+  "are counted as bread.",
   "Bread all sources = bread products (excluding the non-bread items) plus",
   "mixed-dish codes (13503001-13507004, 13507014-13507036, 13508012).",
   "Bread g read from the food-file bread-gram columns:",
@@ -895,10 +888,11 @@ survey_info <- list(
   c(15, paste("AUSNUT 2011-13 (ABS/FSANZ). Bread-gram fields carried on the",
               "updated Basic CURF food file (no separate ADG lookup needed).")),
   c(16, paste("Bread alone: explicit AUSNUT 2011-13 code list per GBI",
-              "2026-05 specification clarification",
-              "(12201001-12203017, 12203022-12305006, 12307001-12307004,",
-              "13201001, 13201002, 13201010, 13201012,",
-              "13203001, 13203002, 13205003).",
+              "2026-05 specification clarification (12201001-12307004 plus",
+              "crispbreads 13201001-2, 13201010/12, 13203001-2, 13205003),",
+              "pruned to exclude breadcrumbs/croutons, pizza base, pumpkin",
+              "bread, johnny cake, corn bread, sweet breads and French toast",
+              "as not bread (focaccia and topped breads kept as bread).",
               "Wholegrain vs refined classified by the food-file bread-gram",
               "majority per code (WGBRGM+WGSVGM+WGMFGM vs",
               "RFBRGM+RFSVGM+RFMFGM); the few codes with no bread-gram",

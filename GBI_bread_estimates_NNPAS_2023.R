@@ -76,33 +76,26 @@ if (REPORT) {
 # pruned to the GBI "bread alone" / "bread all sources" definitions
 # (GBI_Aggregate_Data_Form.xlsx) after reviewing AUSNUT 2023 descriptions.
 bread_product_codes <- c(
-  12201001:12305002, 12305004:12305007, 12306001:12306004,
-  13201001:13201002, 13201018:13201019,
-  13202001, 13204003
+  12201001:12306004,                                        # breads
+  13201001:13201002, 13201018:13201019, 13202001, 13204003  # crispbreads
 )
 
 # Items the GBI definition excludes as NOT bread -- dropped from EVERY measure
-# (incl. all sources, so e.g. pizza-base bread-grams do not leak in):
+# (incl. all sources, so e.g. pizza-base bread-grams do not leak in). Focaccia
+# and topped breads (olive/cheese-topped, garlic/herb) ARE bread and are kept.
 not_bread_codes <- c(
+  12201003:12201008,             # Breadcrumbs, croutons, damper
   12201022, 12201023, 12201024,  # pizza base (commercial / homemade / fast-food)
   12201025,                      # pumpkin bread (quick bread)
+  12202001,                      # corn bread
+  12305003,                      # brioche
+  12305008:12305019,             # sweet breads
   12306004                       # French toast
 )
 
-# Composite / topped / savoury-prepared breads -- carriers rather than
-# standalone bread: excluded from "bread alone", but their bread component is
-# still counted under "bread all sources".
-composite_bread_codes <- c(
-  12304001:12304006,   # bread topped/mixed (cheese, bacon, vegemite, olives, etc.)
-  12306002, 12306003   # garlic / herb bread
-)
+# "Bread alone" = bread products minus non-bread items.
+bread_alone_codes_2023 <- setdiff(bread_product_codes, not_bread_codes)
 
-# "Bread alone" = bread products minus non-bread items minus composites.
-bread_alone_codes_2023 <- setdiff(
-  bread_product_codes, c(not_bread_codes, composite_bread_codes))
-
-# "All bread" = bread products (keeping composites, dropping non-bread items)
-# plus the mixed-dish bread codes (sandwiches, burgers, etc.).
 all_bread_codes_2023 <- c(
   setdiff(bread_product_codes, not_bread_codes),
   13503001:13504001, 13504004:13507004,
@@ -685,13 +678,13 @@ results_ea <- map_dfr(ea_subtype_map, function(info) {
 # SECTION 9: Assemble final output
 # =============================================================================
 ba_notes <- paste(
-  "Bread alone = AUSNUT 2023 bread-product codes",
-  "(12201001-12305002, 12305004-12305007, 12306001-12306004, 13201001-2,",
-  "13201018-19, 13202001, 13204003), pruned to the GBI bread-alone",
-  "definition: excludes pizza base (12201022-24), pumpkin bread (12201025)",
-  "and French toast (12306004) as not bread, and topped/savoury breads",
-  "(cheese/olive-topped 12304001-12304006 and garlic/herb bread 12306002-3)",
-  "as composite carriers counted under all sources only.",
+  "Bread alone = AUSNUT 2023 bread-product codes (12201001-12306004 plus",
+  "crispbreads 13201001-2, 13201018-19, 13202001, 13204003), pruned to the",
+  "GBI bread-alone definition: excludes breadcrumbs/croutons (12201003-08),",
+  "pizza base (12201022-24), pumpkin bread (12201025), corn bread (12202001),",
+  "brioche (12305003), sweet breads (12305008-19) and French toast (12306004)",
+  "as not bread. Focaccia and topped breads (olive/cheese-topped, garlic/herb)",
+  "are counted as bread.",
   "Bread all sources = bread products (excl. the non-bread items, so no",
   "pizza-base grams) plus mixed-dish codes (13503001-13504001,",
   "13504004-13507004, 13507008-13507012, 13507016-13507019). Bread g per",
@@ -701,6 +694,9 @@ ba_notes <- paste(
   "per-code bread-gram majority.",
   "Person-level mean intake averaged across all valid recall days,",
   "with 0-intake days retained.",
+  "Weighting uses the Day-1 selected-person weight (NPAFINWT) for all",
+  "persons; intake and energy are the within-person mean across available",
+  "days but are not Day-2 reweighted (no separate Day-2 weight applied).",
   "Energy adjustment: residual method, log(bread) ~ log(energy),",
   "fitted unweighted on consumers only, standardized to 2000 kcal/day;",
   "non-consumers assigned 0 g/day adjusted intake.",
@@ -875,7 +871,10 @@ survey_info <- list(
               "across all valid recall days.")),
   c(11, paste("Multi-stage area probability sample of private dwellings;",
               "stratified by state/territory and capital city/rest of state")),
-  c(12, "Yes -- NPAFINWT (selected-person Day-1 weight)"),
+  c(12, paste("Yes -- NPAFINWT (selected-person Day-1 weight), applied to",
+              "every person. Intake and energy are the within-person mean",
+              "across available recall days, but the Day-2 days are not",
+              "reweighted (no separate Day-2 weight is applied).")),
   c(13, "Yes -- 60 jackknife replicate weights (WPM0101-WPM0160)"),
   c(14, paste("ABS, Microdata: National Nutrition and Physical Activity Survey,",
               "Australia, 2023 (DataLab/SAS unit-record files);",
@@ -883,13 +882,13 @@ survey_info <- list(
               "calculable for almost all records")),
   c(15, "AUSNUT 2023 (ABS/FSANZ)"),
   c(16, paste("Bread alone: AUSNUT 2023 bread-product codes per GBI 2026-05",
-              "spec (12201001-12305002, 12305004-12305007, 12306001-12306004,",
-              "13201001-2, 13201018-19, 13202001, 13204003), pruned to the GBI",
-              "bread-alone definition: excludes pizza base (12201022-24),",
-              "pumpkin bread (12201025) and French toast (12306004) as not",
-              "bread, and topped/savoury breads (cheese/olive-topped",
-              "12304001-12304006 and garlic/herb bread 12306002-3) as composite",
-              "carriers (counted under all sources only).",
+              "spec (12201001-12306004 plus crispbreads 13201001-2,",
+              "13201018-19, 13202001, 13204003), pruned to the GBI bread-alone",
+              "definition: excludes breadcrumbs/croutons (12201003-08), pizza",
+              "base (12201022-24), pumpkin bread (12201025), corn bread",
+              "(12202001), brioche (12305003), sweet breads (12305008-19) and",
+              "French toast (12306004) as not bread. Focaccia and topped breads",
+              "(olive/cheese-topped, garlic/herb) are counted as bread.",
               "Wholegrain vs refined classified by the AUSNUT 2023 per-code",
               "bread-gram majority (WGBRGM+WGSVGM+WGMFGM vs",
               "RFBRGM+RFSVGM+RFMFGM); ties default to refined.")),

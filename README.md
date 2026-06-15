@@ -75,7 +75,7 @@ install.packages(c("tidyverse", "readxl", "haven", "survey", "srvyr", "openxlsx"
 
 Updated 2026-05 to follow the GBI methodological clarification note (29 April 2026).
 
-- **Person-level means across all valid recall days**: bread intake and total energy are averaged across every valid recall/record day per person (Day 1, and Day 2 where available), with zero-intake days retained as true zeros. Point estimates (means, % non-consumers, energy) use these person-level means — *not* Day 1 alone.
+- **Person-level means across all valid recall days**: bread intake and total energy are averaged across every valid recall/record day per person (Day 1, and Day 2 where available), with zero-intake days retained as true zeros. Point estimates (means, % non-consumers, energy) use these person-level means — *not* Day 1 alone. Every person is weighted by the **Day-1 final person weight `NPAFINWT`** (selected-person weight in 2023); the Day-2 subsample weight (`NPAD2WGT` in 2011-12) is *not* applied and the Day-2 days are not reweighted.
 - **Participants aged <2 years** are excluded (GBI eligibility).
 - **Age groups**: 12 GBI bands (2-5, 6-10, 11-14, 15-19, 20-24, 25-34, 35-44, 45-54, 55-64, 65-74, 75-84, 85+).
 - **Education for children <15**: assigned from the highest-educated adult in the same household.

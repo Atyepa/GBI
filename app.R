@@ -135,6 +135,8 @@ ui <- fluidPage(
 
     checkboxInput("show_ci", "Show 95% CI (mean ± 1.96·SE)", TRUE),
 
+    checkboxInput("show_dl", "Show data labels", TRUE),
+
     radioButtons("orient", "Chart type:",
                  choices  = c("Column" = "column", "Bar" = "bar",
                               "Line"   = "line"),
@@ -281,6 +283,21 @@ server <- function(input, output, session) {
     pctjs <- if (stack_mode && input$metric == "mean_g")
       "+' ('+Highcharts.numberFormat(this.percentage,0)+'% of total)'" else ""
 
+    # Decimal places per metric (reused by the tooltip and the data labels).
+    dec <- c(mean_g = 1, pct_non_consumers = 1, mean_kcal = 1,
+             sd_g = 1, n = 0)[[input$metric]]
+
+    # Value data labels on each column/bar/point, toggled by the checkbox
+    # (default on). Applied per-series so the error-bar series stay unlabelled.
+    show_dl  <- isTRUE(input$show_dl)
+    dl_value <- list(
+      enabled   = show_dl,
+      formatter = JS(sprintf(
+        "function(){return Highcharts.numberFormat(this.y, %d);}", dec)),
+      style     = list(fontSize = "12px", fontWeight = "normal",
+                       textOutline = "none")
+    )
+
     grp_sym <- if (input$groupvar == "_none") NULL else sym(input$groupvar)
     x_sym   <- sym(input$xvar)
 
@@ -340,7 +357,7 @@ server <- function(input, output, session) {
           "var cats=this.series.chart.xAxis[0].categories;",
           "var cat=this.point.name||(cats&&cats[Math.round(this.x)])||this.x;",
           "var suf='", if (nzchar(suffix)) paste0(" ", suffix) else "", "';",
-          "var dec=", c(mean_g=1,pct_non_consumers=1,mean_kcal=1,sd_g=1,n=0)[[input$metric]], ";",
+          "var dec=", dec, ";",
           "var lbl='", c(overall_label="",age_label="Age group",sex_label="Sex",
                          res_label="Residence",edu_label="Education")[[input$xvar]], "';",
           "var hdr=lbl?lbl+': '+cat:cat;",
@@ -382,13 +399,25 @@ server <- function(input, output, session) {
           # legend for the subtypes. Highcharts' default reversedStacks puts
           # the last-added series at the bottom of the stack.
           is_bottom <- k == length(seg_labels)
-          dlabs <- if (!is.null(cluster_field) && is_bottom)
+          # Per-segment value label (toggled by the checkbox) and, on the
+          # bottom segment, the wave/sex cluster label at the base of the
+          # column. dataLabels accepts an array, so both can co-exist.
+          val_dl <- if (show_dl)
+            list(enabled = TRUE, inside = TRUE,
+                 formatter = JS(sprintf(
+                   "function(){return Highcharts.numberFormat(this.y, %d);}", dec)),
+                 style = list(fontSize = "9px", fontWeight = "normal",
+                              color = "#FFFFFF", textOutline = "none"))
+          else NULL
+          clus_dl <- if (!is.null(cluster_field) && is_bottom)
             list(enabled = TRUE, inside = TRUE, verticalAlign = "bottom",
                  rotation = 270, y = -18, format = cl, crop = FALSE,
                  overflow = "allow",
                  style = list(fontSize = "9px", fontWeight = "normal",
                               color = "#FFFFFF", textOutline = "none"))
-          else list(enabled = FALSE)
+          else NULL
+          dlabs <- Filter(Negate(is.null), list(val_dl, clus_dl))
+          if (length(dlabs) == 0) dlabs <- list(enabled = FALSE)
           hc <- hc %>%
             hc_add_series(name = seg_labels[[k]],
                           data = list_parse(tibble(name = cats, y = yv)),
@@ -410,7 +439,8 @@ server <- function(input, output, session) {
       hc <- hc %>%
         hc_add_series(
           name = metric_lbl,
-          data = list_parse2(tibble(name = vals$.cat, y = vals$y))
+          data = list_parse2(tibble(name = vals$.cat, y = vals$y)),
+          dataLabels = dl_value
         )
       if (show_err) {
         err <- vals %>% filter(!is.na(low), !is.na(high)) %>%
@@ -468,7 +498,8 @@ server <- function(input, output, session) {
               data         = ser,
               grouping     = FALSE,           # manual layout
               pointRange   = span / max(n_g, 1),
-              pointPadding = 0
+              pointPadding = 0,
+              dataLabels   = dl_value
             )
 
           err <- sub %>%
@@ -501,7 +532,8 @@ server <- function(input, output, session) {
 
           hc <- hc %>%
             hc_add_series(name = as.character(g),
-                          data = list_parse2(ser))
+                          data = list_parse2(ser),
+                          dataLabels = dl_value)
 
           if (show_err) {
             err <- sub %>% filter(!is.na(lowerCI), !is.na(upperCI)) %>%

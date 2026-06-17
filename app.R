@@ -151,7 +151,17 @@ ui <- fluidPage(
     width = 9,
     tabsetPanel(
       tabPanel("Plot",  highchartOutput("hc",  height = "720px")),
-      tabPanel("Data",  DTOutput("tbl")),
+      tabPanel("Data",
+               DTOutput("tbl"),
+               br(),
+               h4("Significance test (two-sample z, 95%)"),
+               helpText(em(
+                 "Select 2–4 rows in the table above to compare their mean ",
+                 "intake (g/day) pairwise. Valid only for independent (disjoint) ",
+                 "cells — e.g. Urban vs Rural, or 2011-12 vs 2023. Pairs that ",
+                 "share respondents (a subtype vs Total, or a subgroup vs its ",
+                 "'all' total) are flagged as not independent.")),
+               tableOutput("sigtest")),
       tabPanel("About",
                br(),
                p("Visualises GBI bread-intake estimates derived from the ABS NNPAS",
@@ -577,11 +587,85 @@ server <- function(input, output, session) {
         `Mean kcal`  = round(mean_kcal, 1)
       )
     datatable(d, rownames = FALSE,
+              selection = list(mode = "multiple", target = "row"),
               extensions = "Buttons",
               options = list(pageLength = 25, scrollX = TRUE,
                              dom = "Bfrtip",
                              buttons = c("copy", "csv", "excel")))
   })
+
+  # ---- Pairwise significance tests on selected rows -----------------------
+  # Two-sample z-test on the difference of means using the design-based SEs:
+  #   z = (m_i - m_j) / sqrt(SE_i^2 + SE_j^2);  significant at 95% if |z| > 1.96.
+  # Only valid for independent (disjoint) cells; overlapping/same-respondent
+  # pairs are detected and flagged rather than asserted significant.
+  output$sigtest <- renderTable({
+    sel <- input$tbl_rows_selected
+    if (is.null(sel) || length(sel) < 2)
+      return(data.frame(Message =
+        "Select 2–4 rows in the table above to run pairwise z-tests."))
+    if (length(sel) > 4)
+      return(data.frame(Message =
+        paste0("Too many rows selected (", length(sel),
+               "). Select at most 4.")))
+
+    rows <- filtered()[sel, , drop = FALSE]
+
+    # Marginal ("collapses over this dimension") levels per dimension.
+    is_marg <- function(dim, v) {
+      if (dim == "sex_label") isTRUE(as.character(v) == "Persons")
+      else if (dim == "age_label") isTRUE(as.character(v) == "All ages")
+      else is.na(v)            # res_label / edu_label: NA = all
+    }
+    # Independent = the two cells are disjoint respondent groups.
+    independent <- function(a, b) {
+      # Different survey waves are entirely separate samples.
+      if (as.character(a$wave) != as.character(b$wave)) return(TRUE)
+      # Same people measured differently (definition / subtype / energy adj).
+      for (m in c("def_label", "subtype_label", "ea_label"))
+        if (!identical(as.character(a[[m]]), as.character(b[[m]]))) return(FALSE)
+      # Same wave & measure: disjoint iff some demographic dim splits them
+      # into non-overlapping specific levels.
+      for (d in c("sex_label", "age_label", "res_label", "edu_label")) {
+        if (!is_marg(d, a[[d]]) && !is_marg(d, b[[d]]) &&
+            as.character(a[[d]]) != as.character(b[[d]])) return(TRUE)
+      }
+      FALSE
+    }
+    cell_label <- function(r) {
+      bits <- c(
+        as.character(r$wave),
+        as.character(r$subtype_label),
+        if (!is_marg("sex_label", r$sex_label)) as.character(r$sex_label),
+        if (!is_marg("res_label", r$res_label)) as.character(r$res_label),
+        if (!is_marg("edu_label", r$edu_label)) as.character(r$edu_label),
+        if (!is_marg("age_label", r$age_label)) as.character(r$age_label))
+      paste(bits, collapse = ", ")
+    }
+
+    labs  <- vapply(seq_len(nrow(rows)),
+                    function(i) cell_label(rows[i, ]), character(1))
+    combs <- utils::combn(nrow(rows), 2)
+
+    out <- lapply(seq_len(ncol(combs)), function(k) {
+      i <- combs[1, k]; j <- combs[2, k]
+      a <- rows[i, ]; b <- rows[j, ]
+      indep <- independent(a, b)
+      se    <- sqrt(a$se_g^2 + b$se_g^2)
+      z     <- (a$mean_g - b$mean_g) / se
+      p     <- 2 * stats::pnorm(-abs(z))
+      data.frame(
+        Comparison   = paste(labs[i], "vs", labs[j]),
+        `Diff (g)`   = round(a$mean_g - b$mean_g, 1),
+        z            = round(z, 2),
+        p            = formatC(p, format = "f", digits = 3),
+        `Sig (95%)`  = if (!indep) "—" else if (abs(z) > 1.96) "Yes" else "No",
+        Note         = if (!indep)
+          "not independent (shared respondents) — z-test invalid" else "",
+        check.names  = FALSE, stringsAsFactors = FALSE)
+    })
+    do.call(rbind, out)
+  }, striped = TRUE, bordered = TRUE, na = "", width = "100%")
 }
 
 

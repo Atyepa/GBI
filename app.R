@@ -613,9 +613,10 @@ server <- function(input, output, session) {
 
     # Marginal ("collapses over this dimension") levels per dimension.
     is_marg <- function(dim, v) {
-      if (dim == "sex_label") isTRUE(as.character(v) == "Persons")
-      else if (dim == "age_label") isTRUE(as.character(v) == "All ages")
-      else is.na(v)            # res_label / edu_label: NA = all
+      if (is.na(v)) return(TRUE)   # collapsed / not-applicable in this table = all
+      if (dim == "sex_label") return(as.character(v) == "Persons")
+      if (dim == "age_label") return(as.character(v) == "All ages")
+      FALSE                        # res_label / edu_label: a specific level
     }
     # Independent = the two cells are disjoint respondent groups.
     independent <- function(a, b) {

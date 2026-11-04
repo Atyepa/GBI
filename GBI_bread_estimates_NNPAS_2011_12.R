@@ -154,6 +154,7 @@ if (!"PHDKGWBC" %in% names(persons)) persons$PHDKGWBC <- NA_real_
 if (!"PREGNANT" %in% names(persons)) persons$PREGNANT <- NA_integer_
 
 cat("\nPersons loaded:", nrow(persons), "\n")
+n_curf_persons <- nrow(persons)
 
 # --- 2b. Food file ----------------------------------------------------------
 # The updated CURF carries the bread-gram fields per food record (grams of
@@ -867,78 +868,159 @@ wb <- loadWorkbook(template_path)
 # --- 12a. Survey_Info_Template ----------------------------------------------
 n_total   <- nrow(persons)
 n_two_day <- sum(persons$has_d1 & persons$has_d2)
-sample_text <- sprintf("%s persons (%s with 2-day recall)",
-                       format(n_total, big.mark = ","),
-                       format(n_two_day, big.mark = ","))
+mean_days <- mean(persons$n_days)
+qc_max    <- max(abs(qc$diff), na.rm = TRUE)
 
-survey_info <- list(
-  c(3,  "National Nutrition and Physical Activity Survey (NNPAS)"),
-  c(4,  "Australia"),
-  c(5,  "2011-2012"),
-  c(6,  "National (all states and territories, urban and rural)"),
-  c(7,  "Persons aged 2 years and over, usual residents of private dwellings"),
-  c(8,  sample_text),
-  c(9,  "24-hour dietary recall (interviewer-administered, AMPM method)"),
-  c(10, paste("2 days for most respondents (Day 1 face-to-face,",
-              "Day 2 telephone); person-level mean intakes averaged",
-              "across all valid recall days.")),
-  c(11, paste("Multi-stage area probability sample of private dwellings;",
-              "stratified by state/territory and capital city/rest of state")),
-  c(12, paste("Yes -- NPAFINWT (Day-1 final person weight), applied to every",
-              "person. Intake and energy are the within-person mean across",
-              "available recall days, but the Day-2 subsample weight (NPAD2WGT)",
-              "is not used and the Day-2 days are not reweighted.")),
-  c(13, "Yes -- 60 jackknife replicate weights (WPM0101-WPM0160)"),
-  c(14, paste("ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey,",
-              "Nutrition and Physical Activity, 2011-12, Basic CURF",
-              "(with measured height/weight imputed for missing values)")),
-  c(15, paste("AUSNUT 2011-13 (ABS/FSANZ). Bread-gram fields carried on the",
-              "updated Basic CURF food file (no separate ADG lookup needed).")),
-  c(16, paste("Bread alone: explicit AUSNUT 2011-13 code list per GBI",
-              "2026-05 specification clarification (12201001-12307004 plus",
-              "crispbreads 13201001-2, 13201010/12, 13203001-2, 13205003),",
-              "pruned to exclude breadcrumbs/croutons, pizza base, pumpkin",
-              "bread, johnny cake, corn bread, sweet breads and French toast",
-              "as not bread (focaccia and topped breads kept as bread).",
-              "Wholegrain vs refined classified by the food-file bread-gram",
-              "majority per code (WGBRGM+WGSVGM+WGMFGM vs",
-              "RFBRGM+RFSVGM+RFMFGM); the few codes with no bread-gram",
-              "content default to refined, except two English muffins that",
-              "are wholemeal/mixed-grain by name.")),
-  c(17, paste("Bread all sources: bread-alone codes plus mixed-dish codes",
-              "13503001-13507004, 13507014-13507036, 13508012.",
-              "Bread g read from the food-file bread-gram columns",
-              "WGBRGM+WGSVGM+WGMFGM (wholegrain) and",
-              "RFBRGM+RFSVGM+RFMFGM (refined), already in grams per record.")),
-  c(18, paste("Residual method on the log scale (per GBI 2026-04 note):",
-              "fit log(bread) ~ log(energy_kcal) once per bread outcome",
-              "across all consumers (unweighted; pooled across strata);",
-              "compute log(bread)_adj = log(bread) - beta*(log(energy)",
-              "- log(2000)); exponentiate. Non-consumers assigned 0 g/day.",
-              "Implausible energy reporters (and persons with missing",
-              "energy or BMR) excluded from EA estimates only;",
-              "they remain in the unadjusted estimates.")),
-  c(19, paste("Energy plausibility: Schofield (1985) weight-based BMR;",
-              "flag EI:BMR < 0.9 or > 2.4 (Goldberg cutoffs).",
-              "Pregnant women and children <10y exempt and always retained.",
-              "Measured height and weight are imputed (hot-deck by ABS-style",
-              "approach) so BMR is calculable for almost all records.",
-              "Urban = ARIABC 1-2; Rural = ARIABC 3.",
-              "Education for children <15 assigned from highest-educated",
-              "adult in the household.",
-              "Person-level mean intake = mean across all valid recall days",
-              "(0-intake days retained as true zeros).",
-              "SD reported = weighted empirical SD of person-level means",
-              "within stratum (no ANOVA partitioning).",
-              "SE estimated via jackknife replication (60 replicate weights)."))
+# Fully stratified cells with no row or only some rows, for the key notes.
+strata_keys <- c("bread_def", "bread_subtype", "energy_adj",
+                 "sex", "residence", "edu_level", "age_grp")
+full_rows   <- final_output %>% filter(!is.na(residence))
+outcomes    <- full_rows %>% distinct(bread_def, bread_subtype, energy_adj)
+cell_gaps   <- outcomes %>%
+  crossing(sex = 1:2, residence = 1:2, edu_level = 1:3, age_grp = 1:12) %>%
+  anti_join(full_rows, by = strata_keys) %>%
+  count(sex, residence, edu_level, age_grp, name = "n_missing")
+
+cell_label <- function(d) {
+  age_labels_txt <- c("2-5", "6-10", "11-14", "15-19", "20-24", "25-34",
+                      "35-44", "45-54", "55-64", "65-74", "75-84", "85+")
+  paste(sprintf("%s %s with %s education aged %s",
+                c("urban", "rural")[d$residence], c("males", "females")[d$sex],
+                c("Primary", "Secondary", "Tertiary")[d$edu_level],
+                age_labels_txt[d$age_grp]),
+        collapse = "; ")
+}
+empty_cells   <- cell_gaps %>% filter(n_missing == nrow(outcomes))
+partial_cells <- cell_gaps %>% filter(n_missing <  nrow(outcomes))
+gap_text <- paste0(
+  nrow(empty_cells), " of the 144 fully stratified cells have no respondents ",
+  "and are not reported: ", cell_label(empty_cells), ".",
+  if (nrow(partial_cells) > 0) paste0(
+    " ", nrow(partial_cells), " further cell(s) report only some ",
+    "energy-adjusted rows because the respondents were excluded from the ",
+    "other energy-adjusted outcomes: ", cell_label(partial_cells), "."
+  )
 )
 
+n_screened <- sum(persons$AGEC >= 10 & !persons$pregnant_flag &
+                    !is.na(persons$ei_bmr_ratio))
+
+key_notes_text <- paste0(
+  "Source: ABS Cat. No. 4324.0.55.002, Microdata: Australian Health Survey, ",
+  "Nutrition and Physical Activity, 2011-12, Basic CURF, already ",
+  "confidentialised, so no further cell suppression was applied. Dietary ",
+  "data: interviewer-administered 24-hour recalls (AMPM method; Day 1 ",
+  "face-to-face, Day 2 telephone); person-level intake and energy are means ",
+  "across all valid recall days, with 0-intake days retained. Weights: ",
+  "NPAFINWT for all persons (Day-2 weight NPAD2WGT not used); SE from 60 ",
+  "jackknife replicate weights (WPM0101-WPM0160). SD is the weighted empirical ",
+  "SD of person-level means. Energy plausibility: Schofield (1985) weight-based ",
+  "BMR, with measured weight imputed where missing, used instead of the ",
+  "suggested kcal/day cut-offs; EI:BMR <0.9 or >2.4 is flagged. ",
+  sprintf("Flagged: %s of %s screened (%.1f%%). ",
+          format(n_impl, big.mark = ","), format(n_screened, big.mark = ","),
+          100 * n_impl / max(1, n_screened)),
+  "Children <10y and pregnant women are exempt; persons with no BMR are ",
+  "retained unflagged. Deviation from the note: flagged consumers are excluded ",
+  "from energy-adjusted estimates only, while flagged non-consumers stay in at ",
+  "0 g/day, so % non-consumers is higher in energy-adjusted rows than ",
+  "unadjusted rows. Consumers with missing energy are excluded from ",
+  "energy-adjusted estimates; non-consumers stay in at 0 g/day. No sensitivity ",
+  "analyses. SD of energy intake is in the sd_kcal column of the accompanying ",
+  "CSV. Sex = SEX; urban = ARIABC 1-2, rural = ARIABC 3; education from ",
+  "LVHNSQBC + HYSCHCBC, with children <15 assigned the highest-educated adult ",
+  "in the household. ", gap_text
+)
+
+info_cells <- list(
+  D7   = "Australia",
+  D9   = "National Nutrition and Physical Activity Survey",
+  D11  = "NNPAS",
+  F13  = "2011-12",
+  F15  = "2011",
+  J15  = "2012",
+  D17  = "Australian Bureau of Statistics (ABS)",
+  D29  = key_notes_text,
+  D50  = format(n_total, big.mark = ","),
+  F61  = format(n_two_day, big.mark = ","),
+  F64  = sprintf("%.2f", mean_days),
+  D106 = "CURF per-code bread-gram majority",
+  E108 = paste(
+    "Each bread-alone food code is whole-grain if the food-file",
+    "WGBRGM+WGSVGM+WGMFGM exceeds RFBRGM+RFSVGM+RFMFGM, otherwise refined.",
+    "Codes with no bread-gram content default to refined, except two English",
+    "muffins that are wholemeal/mixed-grain by name. The category is",
+    "'wholegrain or high fibre', so this is not the GBI name-based descriptor",
+    "rule and may include high-fibre products with no whole-grain descriptor."
+  ),
+  G133 = paste(
+    "Bread-gram fields on the updated Basic CURF food file (WGBRGM, WGSVGM,",
+    "WGMFGM, RFBRGM, RFSVGM, RFMFGM) give grams of bread per food record,",
+    "summed over bread-alone and mixed-dish codes; fillings are not counted."
+  )
+)
+
+tick_cells <- c(
+  "A33",                         # Q1  National
+  "A41",                         # Q2  Both rural and urban
+  "A44",                         # Q3  Probability sampling with weights
+  if (n_total == n_curf_persons) "A53" else "A54",  # Q5 dietary sample
+  "A60",                         # Q6  Multiple recalls for part of the sample
+  "A69", "A70", "A71", "A72",    # Q8  All four bread outputs
+  "A75", "A76",                  # Q9  Fully stratified and age x sex
+  "A81",                         # Q10 Bread alone: GBI definition
+  "A91",                         # Q11 Bread all sources: GBI definition
+  "A106",                        # Q12 Other (see D106 and E108)
+  "J114",                        # Q13 Sampling weights: Yes
+  "K116",                        # Q14 Usual-intake SD adjustment: No
+  "G118",                        # Q15 Design-based SE
+  "G123",                        # Q16 Residual method
+  "G127",                        # Q17 Pre-disaggregated bread components
+  if (qc_max <= 0.2) "G135" else "G136"             # Q18 QC confirmation
+)
+if (n_total != n_curf_persons) {
+  info_cells$F54 <- format(n_total, big.mark = ",")
+  info_cells$D50 <- format(n_curf_persons, big.mark = ",")
+}
+
+# Cell references follow the layout of the blank Survey_Info_Template sheet.
+# Respondent name, roles and email are left blank for the respondent to add.
 ws_info <- "Survey_Info_Template"
-for (item in survey_info) {
-  writeData(wb, sheet = ws_info, x = item[[2]],
-            startCol = 3, startRow = as.integer(item[[1]]),
+
+put_cell <- function(ref, value) {
+  writeData(wb, sheet = ws_info, x = value,
+            startCol = convertFromExcelRef(ref),
+            startRow = as.integer(gsub("[A-Z]", "", ref)),
             colNames = FALSE)
 }
+style_cell <- function(ref, style) {
+  addStyle(wb, sheet = ws_info, style = style,
+           rows = as.integer(gsub("[A-Z]", "", ref)),
+           cols = convertFromExcelRef(ref), stack = TRUE)
+}
+wrap_style <- createStyle(wrapText = TRUE, valign = "top")
+tick_style <- createStyle(halign = "center", valign = "center",
+                          textDecoration = "bold")
+
+for (ref in names(info_cells)) put_cell(ref, info_cells[[ref]])
+for (ref in tick_cells) {
+  put_cell(ref, "X")
+  style_cell(ref, tick_style)
+}
+
+# Long free-text answers: wrap, and size the rows so the text is visible.
+line_height <- 15
+fit_rows <- function(ref, rows, chars_per_line) {
+  style_cell(ref, wrap_style)
+  n_lines <- ceiling(nchar(info_cells[[ref]]) / chars_per_line) + 1
+  height  <- min(409, n_lines * line_height / length(rows))
+  setRowHeights(wb, sheet = ws_info, rows = rows,
+                heights = rep(max(height, 21), length(rows)))
+}
+fit_rows("D17",  17,        30)
+fit_rows("D29",  29,        90)
+fit_rows("E108", c(108, 109), 70)
+fit_rows("G133", 133,       70)
 cat("  Survey_Info_Template filled\n")
 
 # --- 12b. Codebook -----------------------------------------------------------

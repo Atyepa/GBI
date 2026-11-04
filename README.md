@@ -2,12 +2,13 @@
 
 R programs that produce aggregate bread intake estimates from the ABS National Nutrition and Physical Activity Survey (NNPAS), formatted for Global Bread Intake Study].
 
-Two scripts are provided, one per survey wave:
+Three scripts are provided. NNPAS 2023 has one for each version of the microdata, because their variables differ and neither script runs on the other's files:
 
 | Script | Survey | Data source |
 |---|---|---|
 | `GBI_bread_estimates_NNPAS_2011_12.R` | NNPAS 2011-12 | ABS Basic CURF (CSV) |
-| `GBI_bread_estimates_NNPAS_2023.R` | NNPAS 2023 | ABS DataLab unit-record files (`sas7bdat`) |
+| `GBI_bread_estimates_NNPAS_2023.R` | NNPAS 2023 | ABS DataLab detailed unit-record files (`sas7bdat`) |
+| `GBI_bread_estimates_NNPAS_2023_CURF.R` | NNPAS 2023 | ABS Basic CURF (`sas7bdat` by default, or CSV) |
 
 Each script produces output matching the data specifications provided. 
 
@@ -53,14 +54,40 @@ Place in a `NNPAS_2023/` subdirectory:
 
 The 2023 script must be run inside the ABS DataLab (or any other environment that holds the unit-record files) — it cannot be executed from public files.
 
+### NNPAS 2023 (Basic CURF)
+
+Set `nnpas_dir` at the top of `GBI_bread_estimates_NNPAS_2023_CURF.R` to the folder holding these files (default `NNPAS_2023/`):
+
+| File | Description |
+|---|---|
+| `nnpas23hhd.sas7bdat` | Household level |
+| `nnpas23sps.sas7bdat` | Selected person level |
+| `nnpas23food.sas7bdat` | Food/recall level |
+| `AUSNUT2023.xlsx` | AUSNUT 2023 food composition database |
+
+To use the CSV versions (`nnpas23hhd.csv` and so on), set `input_format <- "csv"`.
+
+The analysis is the same as the DataLab script, with these differences:
+
+| | DataLab script | Basic CURF script |
+|---|---|---|
+| **Age** | `AGE99` | `AGEC` |
+| **Sex** | `SEXBIRTH` | `SEX` |
+| **Education** | `HIGHLVLD` | `LVHNSQBC` + `HYSCHCBC` |
+| **Remoteness** | `ARIA21SL` 0-1 → urban; 2-4 → rural | `ARIA21BC` 1-2 → urban; 3 → rural |
+| **`MIN_CELL_N`** | Set for DataLab release | 1, because the CURF is already confidentialised |
+
 ## Usage
 
 ```r
 # 2011-12
 source("GBI_bread_estimates_NNPAS_2011_12.R")
 
-# 2023
+# 2023, detailed DataLab microdata
 source("GBI_bread_estimates_NNPAS_2023.R")
+
+# 2023, Basic CURF
+source("GBI_bread_estimates_NNPAS_2023_CURF.R")
 ```
 
 ## R packages
